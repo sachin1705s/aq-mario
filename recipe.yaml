@@ -1,0 +1,45 @@
+# AQ-Mario — JEPA world model for Super Mario Bros 1-1.
+#
+# `method: jepa` resolves to methods/jepa.py IN THIS TRAIN. protocol/method.py
+# checks train/methods/<name>.py BEFORE kernel/methods/, so this is a
+# first-class extension point, not a workaround.
+#
+# eval.min_score is the fail-closed gate: engine/step.py:do_eval computes
+# all_pass against it. That is the "catch it at epoch 2" behaviour — native,
+# not something bolted on.
+family: jepa
+method: jepa
+
+# --- what to fit -------------------------------------------------------------
+variant: aux                # pure | aux   (aq fork + aq diff to compare)
+latent_dim: 192
+encoder: vit_tiny_patch14
+predictor_layers: 6
+history_len: 3
+pred_horizon: 3
+frame_skip: 2
+epochs: 12
+batch_size: 256
+lr: 3.0e-4
+precision: bf16
+seed: 0
+
+sigreg_lambda: 0.1          # sweep {0.01, 0.1, 0.5} — each value is a FULL run
+aux_y_lambda: 0.05
+aux_scroll_lambda: 0.05
+aux_alive_lambda: 0.02
+
+data:
+  path: data/shards
+  target: latent
+
+# --- the gate ----------------------------------------------------------------
+# Scored by methods/jepa.py:evaluate(). Returns the min of the three probe R2s
+# normalised against their thresholds, so min_score 1.0 means "every gate met".
+eval:
+  metric: gate_score
+  min_score: 1.0
+
+# fail closed on NaN/Inf and loss blow-up during fit
+guard:
+  safety: true
