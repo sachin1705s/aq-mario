@@ -1,57 +1,62 @@
 # AQ-Mario — status
 
-**Overall: 20%**
+**Overall: 58%**
 
 | Stage | Progress | Exit criteria |
 |---|---|---|
-| 1. Ground truth | 44% | RAM addresses locked by a real trace AND >=8k episodes sharded. |
-| 2. World model | 20% | 10+ epochs trained bf16, both losses moving, curves live in aquin watch. |
-| 3. Gates + inspect | 17% | Gates run per checkpoint, y-probe R2 > 0.80, SAE lambda-diff table produced. |
-| 4. Control | 0% | Sub-goal chain clears World 1-1; y-feature steering changes the rollout. |
+| 1. Ground truth | 100% | RAM addresses locked by a real trace AND >=8k episodes sharded. |
+| 2. World model | 73% | 10+ epochs trained bf16, both losses moving, curves live in aquin watch. |
+| 3. Gates + inspect | 43% | Gates run per checkpoint, y-probe R2 > 0.80, SAE lambda-diff table produced. |
+| 4. Control | 14% | Sub-goal chain clears World 1-1; y-feature steering changes the rollout. |
 
-## Stage 1 — Ground truth · 44%
+## Stage 1 — Ground truth · 100%
 
 _RAM extraction you can trust, and 8k episodes of 1-1 behind it._
 
 - [x] **ram.py — single RAM->state definition** — ram_state, validated
-- [ ] **RAM addresses validated on a 60-frame trace** — unvalidated: world_y — run scripts/validate_ram.py --lock
+- [x] **RAM addresses validated on a 60-frame trace** — locked: world_y=page_B5_fine_CE
 - [x] **collect_data.py emulator + logging** — collect, save_shard
-- [~] **dataset size / shard RAM projection** — 5.2M obs / 783 GB raw — I/O bound; consider frame_size 112 or fewer eps
-- [x] **modal_app.py CPU fan-out for data-gen** — collect_shard
-- [ ] **episodes collected** — no data dir yet
+- [x] **dataset size / shard RAM projection** — 7.1M obs, 1065 GB raw -> 39 GB on disk (27x), 2.6 GB peak, 4.0 core-hr
+- [x] **modal_app.py CPU fan-out for data-gen** — collect_shard + pinned emulator stack + Volume out-dir
+- [x] **Stage 1 eval suite passing** — 63 evals here, 143 passing suite-wide
+- [x] **PPO explorer for the back half of 1-1** — PPO mean final x 2424/3161
+- [x] **episodes collected** — 8000/8000 eps — modal 512 shards (ppo 4000, random 4000), 27 GB; local 3 shards, 0.1 GB
 
-## Stage 2 — World model · 20%
+## Stage 2 — World model · 73%
 
 _A ~15M JEPA that predicts 1-1 dynamics in 192-dim latent space._
 
-- [ ] **model.py encoder + action-enc + AdaLN-Zero predictor** — not written
-- [ ] **losses.py SIGReg + aux heads** — not written
-- [ ] **parameter count in ~15M band** — no dry run yet
-- [ ] **single-shard dry run, both losses move** — single-shard dry run not done
-- [ ] **metrics.jsonl streaming** — no metrics.jsonl
+- [x] **data.py windows + trajectory split** — ShardWindows, trajectory split, action alignment
+- [x] **model.py encoder + action-enc + AdaLN-Zero predictor** — Encoder, ActionEncoder, Predictor
+- [x] **losses.py SIGReg + aux heads** — sigreg, aux_heads
+- [~] **parameter count in ~15M band** — 9.8M params (target ~15M)
+- [x] **single-shard dry run, both losses move** — pred 0.531->0.282, eff_dim 24.4/64 null, sigreg 1.4x null (lam=10.0)
+- [x] **metrics.jsonl streaming** — 3 steps · pred_loss=1.453 sigreg_loss=0.03487 eff_dim=6.17
 - [ ] **aquin watch ingesting curves** — no aquin watch runs (needs `aquin login` + `session start`)
 - [x] **methods/jepa.py wired as recipe `method: jepa`** — fit/evaluate/predict/write_inspect
 - [x] **aq_watch / aq_sae adapters** — aq_watch + aq_sae
-- [ ] **full run 10+ epochs** — not started
+- [x] **Stage 2 eval suite passing** — 40 evals here, 143 passing suite-wide
+- [ ] **full run 10+ epochs** — epoch 0/12
 
-## Stage 3 — Gates + inspect · 17%
+## Stage 3 — Gates + inspect · 43%
 
 _The Aquin claim: catch a planning failure from the representation alone._
 
-- [ ] **gates.py probe / aliasing / dead-in-5** — not written
-- [ ] **run_gates.py standalone on a checkpoint** — not written
+- [x] **gates.py probe / aliasing / dead-in-5** — probe_gate, aliasing_gate, dead_in_5_gate
+- [x] **run_gates.py standalone on a checkpoint** — main
 - [ ] **gate thresholds met** — no gate run yet
 - [ ] **beats LeMario's published numbers** — no numbers yet
 - [x] **gate fails closed via recipe eval.min_score** — recipe eval.min_score + methods/jepa.py:evaluate() — fails closed
+- [x] **Stage 3 eval suite passing** — 12 evals here, 143 passing suite-wide
 - [ ] **latents dumped as chunk_*.pt** — no latents dumped
 - [ ] **SAE trained per SIGReg lambda** — 0/3 SAEs (one per SIGReg lambda)
 - [ ] **lambda-sweep feature diff table** — no lambda-sweep feature diff
 
-## Stage 4 — Control · 0%
+## Stage 4 — Control · 14%
 
 _Plan with the model, and steer it with a feature the SAE found._
 
-- [ ] **plan.py macro-CEM + probe cost** — not written
+- [x] **plan.py macro-CEM + probe cost** — MacroCEM (categorical), probe-scored cost, steer_predictor
 - [ ] **y-feature steering changes rollout** — y-feature steering not demonstrated
 - [ ] **nearby-goal sanity plan** — nearby-goal sanity plan not run
 - [ ] **clears World 1-1** — 0/3161 world_x

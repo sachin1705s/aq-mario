@@ -102,11 +102,43 @@ def evaluate(model: dict, src: Path, rec: dict) -> tuple[float, int]:
     return float(min(ratios)), int(res.get("n", 0))
 
 
-def predict(model: dict, X: list) -> list:
-    """Roll the predictor forward from latents X. Used by `aq serve`."""
+def predict(model: dict, X: list, rec: dict | None = None) -> list:
+    """
+    Roll the predictor forward. Used by `aq serve`.
+
+    Two bugs lived here until this was actually executed rather than read:
+    `model["weights"]` is stored RELATIVE to the train dir (fit() makes it so, on
+    purpose, so a train directory is movable), and it was being opened as if it
+    were absolute — FileNotFoundError the first time anyone called it. And
+    JEPA.rollout takes (frames, actions); it was being handed one argument.
+
+    X is a list of (frames, actions) pairs, or of frame arrays when the caller
+    has no actions to offer, in which case the null action is used throughout.
+    """
+    import torch
+
     from aqmario.model import load_jepa
-    m = load_jepa(Path(model["weights"]))
-    return m.rollout(X)
+
+    train_dir = Path(rec["_train"]) if rec and "_train" in rec else REPO
+    w = Path(model["weights"])
+    if not w.is_absolute():
+        w = train_dir / w
+    m = load_jepa(w)
+    n_btn = m.cfg.data.frame_skip, 6
+
+    out = []
+    for item in X:
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            frames, actions = item
+        else:
+            frames, actions = item, None
+        frames = torch.as_tensor(frames)
+        if frames.ndim == 4:
+            frames = frames.unsqueeze(0)
+        if actions is None:
+            actions = torch.zeros(frames.shape[0], m.W - 1, *n_btn)
+        out.append(m.rollout(frames, torch.as_tensor(actions).float()).cpu())
+    return out
 
 
 def write_inspect(train: Path, model: dict) -> str:

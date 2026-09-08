@@ -33,6 +33,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aqmario import ram as R
 from aqmario.config import CFG, BUTTONS
 
+OUTCOME_OTHER, OUTCOME_DEATH = 0, 1     # per-episode termination reason
+
 
 def preprocess(frame, size):
     """
@@ -69,13 +71,18 @@ def random_policy(combos):
 
 
 def load_ppo(ckpt):
-    from stable_baselines3 import PPO
-    model = PPO.load(ckpt)
+    """
+    The PPO track. Returns aqmario.ppo.PPOPolicy, which carries the SAME
+    grayscale/resize/frame-stack the policy was trained under.
 
-    def pick(obs):
-        a, _ = model.predict(obs, deterministic=False)   # keep it noisy
-        return int(a)
-    return pick
+    The draft here called model.predict() on the raw (240,256,3) RGB frame. SB3
+    would not have raised — it reshapes whatever it is given — the policy would
+    just have been reading noise, and 4000 GPU-funded episodes would have come
+    back indistinguishable from the free random ones. Preprocessing has exactly
+    one definition, in aqmario/ppo.py, imported by both sides.
+    """
+    from aqmario.ppo import PPOPolicy
+    return PPOPolicy(ckpt, deterministic=False)
 
 
 def save_shard(out_dir: Path, idx: int, episodes: list):
@@ -95,8 +102,9 @@ def save_shard(out_dir: Path, idx: int, episodes: list):
         ep_offsets=off,
     )
     for k, dt in (("world_x", np.int32), ("world_y", np.int32), ("scroll", np.int32),
-                  ("alive", np.uint8), ("power", np.uint8)):
+                  ("alive", np.uint8), ("power", np.uint8), ("dies_in_5", np.uint8)):
         pack[k] = np.concatenate([e[k] for e in episodes]).astype(dt)
+    pack["outcome"] = np.array([e["outcome"] for e in episodes], dtype=np.uint8)
 
     path = out_dir / f"shard_{idx:04d}.npz"
     np.savez_compressed(path, **pack)
@@ -120,7 +128,11 @@ def collect(args):
     chosen = {**R.CHOSEN, **(R.load_lock() or {}).get("chosen", {})}
 
     size, skip = CFG.data.frame_size, CFG.data.frame_skip
-    out_dir = CFG.data.data_dir / args.policy
+    # data_dir defaults to ~/.aqmario/data, which inside a Modal container is
+    # the container's own filesystem, NOT the mounted Volume — shards written
+    # there vanish when the container exits. --out-dir points at /data.
+    base = Path(args.out_dir).expanduser() if args.out_dir else CFG.data.data_dir
+    out_dir = base / args.policy
     out_dir.mkdir(parents=True, exist_ok=True)
 
     env = JoypadSpace(gym_super_mario_bros.make(CFG.data.level), COMPLEX_MOVEMENT)
@@ -144,6 +156,8 @@ def collect(args):
 
     for _ in trange(args.episodes, desc=f"{args.policy}"):
         obs = env.reset()
+        if hasattr(pick, "reset"):
+            pick.reset(obs)          # PPO's frame stack is per-episode state
         frames, actions, states = [], [], []
         done, step = False, 0
         while not done and step <= args.max_steps:
@@ -165,11 +179,20 @@ def collect(args):
             dropped += 1
             continue
         kept += 1
+        alive = np.array([s["alive"] for s in states], dtype=np.uint8)
+        # dies_in_5 must be computed once the whole episode is known: raw `alive`
+        # is 0 on ~0.007% of frames (the episode ends the instant Mario dies), so
+        # a BCE head on it learns "always alive". Rolling it 5 observations back
+        # turns a coincident signal into the predictive one the gate needs.
+        dies = R.dies_within(alive, 5)
         shard.append(dict(
             frames=np.stack(frames),
             actions=np.stack(actions),
+            alive=alive,
+            dies_in_5=dies,
+            outcome=OUTCOME_DEATH if not alive[-1] else OUTCOME_OTHER,
             **{k: np.array([s[k] for s in states]) for k in
-               ("world_x", "world_y", "scroll", "alive", "power")},
+               ("world_x", "world_y", "scroll", "power")},
         ))
         if len(shard) >= CFG.data.shard_size:
             save_shard(out_dir, shard_idx, shard)
@@ -188,6 +211,8 @@ if __name__ == "__main__":
     ap.add_argument("--ppo-ckpt", type=str, default=None)
     ap.add_argument("--shard-start", type=int, default=0,
                     help="offset so parallel Modal containers don't collide")
+    ap.add_argument("--out-dir", type=str, default=None,
+                    help="write shards here instead of CFG.data.data_dir (use /data on Modal)")
     args = ap.parse_args()
     t0 = time.time()
     collect(args)

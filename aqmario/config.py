@@ -48,12 +48,42 @@ class DataConfig:
     # 16 keeps a shard near ~2.7 GB peak. See tracker's projected-size readout.
     shard_size: int = 16
 
+    # Window stride. At stride 1 consecutive windows overlap by 7 of 8 frames and
+    # one epoch over 2.67M observations is ~27,800 steps at batch 96 — measured
+    # ~1.9 steps/s on an A10G, so 12 epochs would be 49 hours there and the
+    # plan's "3.2 h H100" estimate is not reachable. Stride 4 keeps every frame
+    # in the dataset (windows still overlap by half) and cuts an epoch to ~7,000
+    # steps, which is what the budget was written against.
+    window_stride: int = 4
+
+    # Fraction of each batch drawn from windows that CONTAIN a death.
+    #
+    # Deaths are ~1 per episode: 5 labelled observations out of ~669, so 0.75% of
+    # frames. Sampling windows uniformly, MEASURED over 40 real batches of 96
+    # windows: 18 of 40 batches contained ZERO deaths and one contained 24. The
+    # dead-in-5 head therefore gets no positive gradient on ~45% of steps, and
+    # aux_dead alone accounts for 48% of the total loss variance (std/mean 0.43
+    # against aux_scroll's 0.09) — the jagged loss curve is this term firing.
+    # Oversampling fixes both the variance and the dead steps; pos_weight in
+    # AuxHeads then corrects the remaining imbalance.
+    death_window_frac: float = 0.15
+
     data_dir: Path = Path("~/.aqmario/data").expanduser()
 
-    # Rough per-episode emulator-frame counts, used ONLY by the tracker to
-    # project dataset size before you spend an hour generating it.
-    est_frames_random: int = 400
+    # MEASURED on the full 4000-episode random track (not estimated, and no
+    # longer extrapolated from 40): 2,674,774 observations / 4000 episodes = 669
+    # obs = 1338 emulator frames per episode, 3.3x the 400 originally assumed.
+    # The earlier 40-episode sample said 1094 and was 20% low. PPO is still an
+    # estimate until that track runs.
+    est_frames_random: int = 1338
     est_frames_ppo: int = 2200
+    # MEASURED compression on real shards: 5.4 KB/obs on disk vs 147 KB raw.
+    # NES art deflates far better than the 4x originally assumed, which is what
+    # takes training off the network-I/O bound.
+    # 14.7 GB on the volume for 2.67M observations = 5.5 KB/obs against 147 KB
+    # raw. Confirmed at full scale, not just on the first three shards.
+    compression_ratio: float = 27.4
+    sec_per_episode: float = 1.78          # measured, single core
 
 
 # ---- Model ------------------------------------------------------------------
@@ -66,7 +96,20 @@ class ModelConfig:
     predictor_dropout: float = 0.1          # paper ablation: 0.1 is the sweet spot
     history_len: int = 3                    # frames the predictor attends over
     action_frames: int = None               # set in __post_init__ from frame_skip
-    pred_horizon: int = 3                   # predict next 3 latents
+    # 5, not 3. TARGETS below compares mse_5step / gain_5step against LeMario;
+    # at horizon 3 those two are simply not measurable, and rolling further at
+    # eval time is not an option because the predictor's positional embedding is
+    # fixed at history_len + pred_horizon. Costs 33% more per batch (window 6->8).
+    pred_horizon: int = 5
+
+    # ViT activation checkpointing. NOT optional above batch ~64: a step encodes
+    # batch_size x window images (8 frames per window at horizon 5), so batch 128
+    # is 1024 forward passes of a 257-token ViT and OOMs a 24 GB A10G. This
+    # matters because SIGReg's ability to see a collapse is mostly a function of
+    # BATCH size (measured: rank-2 reads 2.8x null at n=32, 41.8x at n=512), so
+    # the regulariser and the memory budget pull in opposite directions and
+    # checkpointing is what buys the batch. Costs ~30% step time.
+    grad_checkpointing: bool = True
 
     def __post_init__(self):
         self.action_frames = DataConfig().frame_skip
@@ -79,9 +122,16 @@ class LossConfig:
     sigreg_lambda: float = 0.1              # paper default; only effective knob
     sigreg_projections: int = 1024
     sigreg_knots: int = 17
+    # MEASURED, and the reason these are a real knob rather than a garnish:
+    # collapsing the latent is worth ~0.80 of pred_loss to the optimiser, while
+    # the aux terms at 0.05 cost it at most 0.008 in total (the normalised
+    # targets have std 0.36 and 0.15, so a mean-predictor loses 0.05*0.36^2 +
+    # 0.05*0.15^2). That is 100x too weak to influence anything. aux_scale
+    # multiplies all three so the ablation is one number.
     aux_y_lambda: float = 0.05              # Mario vertical position
     aux_scroll_lambda: float = 0.05         # camera scroll offset (fixes aliasing)
     aux_alive_lambda: float = 0.02          # dead-in-N signal
+    aux_scale: float = 1.0                  # global multiplier on the three above
 
     # Stage 3 lambda-sweep. NOTE: this is SIGReg lambda, so each value is a FULL
     # training run (~3.2 h H100, ~$17), not a cheap SAE refit. Budget accordingly.
@@ -95,7 +145,13 @@ class GateConfig:
     min_y_probe_r2: float = 0.80            # LeMario got 0.188 here — the target
     min_scroll_probe_r2: float = 0.90
     aliasing_px: int = 500
-    min_aliasing_margin: float = 0.10
+    min_aliasing_margin: float = 0.10       # reported; see gates.aliasing_usable_range
+    # The GATE. Latent distance must stay informative out to at least this many
+    # world px, because that is the span a single planner sub-goal covers.
+    # plan.PlanConfig.subgoal_px is 200 and was chosen on intuition; the measured
+    # saturation point on the first trained checkpoint is also ~200, so the gate
+    # and the planner are asking the same question.
+    aliasing_px_usable: int = 200
     probe_val_frac: float = 0.2
     probe_trajectories: int = 60            # Bai's split protocol, for comparability
 
@@ -111,13 +167,35 @@ class SAEConfig:
 
 
 # ---- Targets we are trying to beat (LeMario) --------------------------------
+# HOW TO READ mse_*: pred_loss is MSE in a latent space the model chooses its own
+# scale for, so the raw number means nothing alone. The encoder ends in
+# BatchNorm(affine=False), which pins var(z)=1 per coordinate, so a mean-predictor
+# scores exactly 1.0 and gain = 1 - mse. That is why `gain` is the comparable
+# column and mse is the convenience one.
+#
+# AND NEITHER IS VALID WITHOUT eff_dim. A rank-1 latent still has unit variance
+# per coordinate after that BN (every coordinate perfectly correlated), so the
+# predictor only has to predict ONE SCALAR: measured on the first real dry run,
+# pred_loss 0.061 -> gain 0.939, which would "beat" LeMario's 0.455 while eff_dim
+# sat at 1.17. Quote gain and eff_dim together or do not quote gain.
+# RAW MSE IS NOT COMPARABLE ACROSS LATENT SCALES, and the original targets here
+# were. LeMario reports mse_5step 0.07772 AND gain_5step 0.455 together, which
+# pins their latent variance at 0.07772/(1-0.455) = 0.1426 (cross-checks: their
+# 1-step implies gain 0.903). Ours is exactly 1.0, forced by BN(affine=False).
+# Identical predictive quality therefore shows up as a 7.0x larger MSE for us,
+# and the original "mse_5step < 0.05" target silently meant gain > 0.95.
+# `comparable` marks the columns that survive the scale difference.
 TARGETS = {
-    "mse_1step":       dict(lemario=0.01377, target=0.012,  cmp="lt"),
-    "mse_5step":       dict(lemario=0.07772, target=0.05,   cmp="lt"),
-    "gain_5step":      dict(lemario=0.455,   target=0.60,   cmp="gt"),
-    "x_probe_r2":      dict(lemario=0.997,   target=0.97,   cmp="gt"),
-    "y_probe_r2":      dict(lemario=0.188,   target=0.90,   cmp="gt"),
-    "scroll_probe_r2": dict(lemario=None,    target=0.90,   cmp="gt"),
+    "mse_1step":       dict(lemario=0.01377, target=0.10,   cmp="lt", comparable=False,
+                            note="their scale; ours is 7.0x larger for equal quality"),
+    "mse_5step":       dict(lemario=0.07772, target=0.40,   cmp="lt", comparable=False,
+                            note="0.40 on our scale == gain 0.60; their 0.05 == gain 0.95"),
+    "gain_5step":      dict(lemario=0.455,   target=0.60,   cmp="gt", comparable=True),
+    # R2 is scale-invariant, so the probe columns compare directly. This is the
+    # headline: 0.188 is the number the whole project exists to move.
+    "x_probe_r2":      dict(lemario=0.997,   target=0.97,   cmp="gt", comparable=True),
+    "y_probe_r2":      dict(lemario=0.188,   target=0.90,   cmp="gt", comparable=True),
+    "scroll_probe_r2": dict(lemario=None,    target=0.90,   cmp="gt", comparable=True),
 }
 
 

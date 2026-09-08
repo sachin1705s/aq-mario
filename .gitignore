@@ -5,4 +5,12 @@ jobs/
 sandbox/
 *.pt
 *.npz
-*.gif
+
+# reports are kept; scratch is not
+.DS_Store
+.pytest_cache/
+.venv/
+dump/
+
+# generated gifs from runs, not the curated demo
+artifacts/*.gif

@@ -141,33 +141,102 @@ def p_collector():
 
 
 def p_shards():
-    if not DATA.exists():
-        return TODO, "no data dir yet"
-    shards = list(DATA.rglob("shard_*.npz"))
-    if not shards:
-        return TODO, "0 shards"
-    gb = sum(s.stat().st_size for s in shards) / 1e9
-    eps = len(shards) * CFG.data.shard_size
+    """
+    Shards LOCAL and ON THE MODAL VOLUME. Nearly all the data lives on the
+    volume — training runs there and the shards are never downloaded — so a
+    purely local probe reported "3 shards / 48 episodes" while 4000 episodes sat
+    in `aqmario-data`. The manifest is refreshed by
+    `modal run modal_app.py::data_stats`, and is stamped with the time it was
+    taken so a stale one is visible as stale rather than silently trusted.
+    """
+    local = list(DATA.rglob("shard_*.npz")) if DATA.exists() else []
+    gb = sum(s.stat().st_size for s in local) / 1e9
+    man = _read_json(DATA / "modal_manifest.json") if (DATA / "modal_manifest.json").is_file() else None
+
+    counts = {k: v for k, v in (man or {}).get("by_policy", {}).items()}
+    remote_shards = sum(c.get("shards", 0) for c in counts.values())
+    remote_eps = sum(c.get("episodes", 0) for c in counts.values())
+    if not local and not remote_shards:
+        return TODO, "0 shards (run modal_app.py::stage1_data)"
+
+    eps = remote_eps or len(local) * CFG.data.shard_size
     target = CFG.data.episodes_random + CFG.data.episodes_ppo
-    pct = eps / target
-    state = DONE if pct >= 1.0 else PARTIAL
-    return state, f"{len(shards)} shards ~{eps}/{target} eps, {gb:.1f} GB on disk"
+    where = []
+    if remote_shards:
+        by = ", ".join(f"{k} {c.get('episodes', 0)}" for k, c in sorted(counts.items()))
+        where.append(f"modal {remote_shards} shards ({by}), {man.get('gb', 0):.0f} GB")
+    if local:
+        where.append(f"local {len(local)} shards, {gb:.1f} GB")
+    detail = f"{eps}/{target} eps — " + "; ".join(where)
+    if man and man.get("stale_hours", 0) > 24:
+        detail += f" [manifest {man['stale_hours']:.0f}h old]"
+    return (DONE if eps >= target else PARTIAL), detail
 
 
 def p_data_budget():
     d = CFG.data
     obs = (d.episodes_random * d.est_frames_random + d.episodes_ppo * d.est_frames_ppo) / d.frame_skip
     raw = obs * d.frame_size ** 2 * 3 / 1e9
+    disk = raw / d.compression_ratio
     peak = d.shard_size * d.est_frames_ppo / d.frame_skip * d.frame_size ** 2 * 3 / 1e9
+    corehr = (d.episodes_random + d.episodes_ppo) * d.sec_per_episode / 3600
     if peak > 8:
         return TODO, f"shard_size={d.shard_size} -> {peak:.0f} GB peak RAM, will OOM"
-    if raw > 500:
-        return PARTIAL, f"{obs/1e6:.1f}M obs / {raw:.0f} GB raw — I/O bound; consider frame_size 112 or fewer eps"
-    return DONE, f"{obs/1e6:.1f}M obs, {raw:.0f} GB raw, {peak:.1f} GB peak shard RAM"
+    if disk > 900:
+        return PARTIAL, f"{disk:.0f} GB on disk exceeds the 1 TiB free volume tier"
+    return DONE, (f"{obs/1e6:.1f}M obs, {raw:.0f} GB raw -> {disk:.0f} GB on disk "
+                  f"({d.compression_ratio:.0f}x), {peak:.1f} GB peak, {corehr:.1f} core-hr")
 
 
 def p_modal_data():
-    return _has_symbols("modal_app.py", "collect_shard")
+    st, detail = _has_symbols("modal_app.py", "collect_shard")
+    if st != DONE:
+        return st, detail
+    txt = _src("modal_app.py").read_text()
+    pins = [p for p in ("numpy<2", "gym==0.25.2", "nes-py==8.2.1") if p in txt]
+    if len(pins) < 3:
+        return PARTIAL, "emulator version pins missing — image will fail to build"
+    if "--out-dir" not in txt:
+        return PARTIAL, "shards would write outside the Volume"
+    return DONE, "collect_shard + pinned emulator stack + Volume out-dir"
+
+
+def p_tests(*names):
+    """
+    Eval-suite probe. `.pytest_result.json` is written by tests/conftest.py's
+    sessionfinish hook, so it cannot be hand-edited into looking green — but it
+    is whole-suite, so a per-stage check counts that stage's own files and
+    reports the suite's pass/fail state alongside.
+    """
+    def probe():
+        d = ROOT / "tests"
+        files = [d / f"test_{n}.py" for n in names] if names else sorted(d.glob("test_*.py"))
+        files = [f for f in files if f.is_file()]
+        if not files:
+            return TODO, "no eval file for this stage"
+        n = sum(f.read_text().count("\ndef test_") for f in files)
+        last = ROOT / ".pytest_result.json"
+        if not last.is_file():
+            return PARTIAL, f"{n} evals across {len(files)} files (never run)"
+        r = _read_json(last) or {}
+        if r.get("failed"):
+            return PARTIAL, f"{n} evals here; suite has {r['failed']} FAILING"
+        return DONE, f"{n} evals here, {r.get('passed', '?')} passing suite-wide"
+    return probe
+
+
+def p_ppo():
+    """The PPO track: random play stops at world_x 1416 of 3161."""
+    st, detail = _has_symbols("scripts/train_ppo.py", "main")
+    if st != DONE:
+        return TODO, "scripts/train_ppo.py not written — back half of 1-1 unreachable"
+    if not (ROOT / "aqmario" / "ppo.py").is_file():
+        return PARTIAL, "train_ppo.py present but aqmario/ppo.py (shared preprocessing) missing"
+    cov = _read_json(RUNS / "ppo" / "ppo_coverage.json") if (RUNS / "ppo" / "ppo_coverage.json").is_file() else None
+    if not cov:
+        return PARTIAL, "code ready; PPO not trained yet (modal run modal_app.py::stage1_ppo)"
+    mx = cov.get("final_x_mean", 0)
+    return (DONE if mx >= 2000 else PARTIAL), f"PPO mean final x {mx:.0f}/{FLAGPOLE_X}"
 
 
 # =============================================================================
@@ -175,6 +244,17 @@ def p_modal_data():
 # =============================================================================
 def p_model():
     return _has_symbols("aqmario/model.py", "Encoder", "ActionEncoder", "Predictor")
+
+
+def p_data_path():
+    st, detail = _has_symbols("aqmario/data.py", "ShardWindows", "split_episodes", "make_loader")
+    if st != DONE:
+        return st, detail
+    txt = _src("aqmario/data.py").read_text()
+    # the two silent-corruption guards, asserted in the source itself
+    if "s + 1:s + W" not in txt:
+        return PARTIAL, "action off-by-one not applied — predictor would see the causing action"
+    return DONE, "ShardWindows, trajectory split, action alignment"
 
 
 def p_losses():
@@ -192,11 +272,25 @@ def p_param_count():
 
 
 def p_dryrun():
+    """
+    Learning AND not collapsing. The first version of this check accepted
+    "both losses moved", and a run that mapped every frame to one latent passed
+    it — pred_loss 0.975->0.061 with eff_dim 9.96->1.17.
+    """
     d = _read_json(RUNS / "dryrun.json") if (RUNS / "dryrun.json").is_file() else None
     if not d:
         return TODO, "single-shard dry run not done"
-    moved = d.get("pred_loss_moved") and d.get("sigreg_loss_moved")
-    return (DONE if moved else PARTIAL), f"pred moved={d.get('pred_loss_moved')} sigreg moved={d.get('sigreg_loss_moved')}"
+    ed, null = d.get("eff_dim_last", 0), d.get("eff_dim_null", 0) or 1
+    detail = (f"pred {d.get('pred_loss_first', 0):.3f}->{d.get('pred_loss_last', 0):.3f}, "
+              f"eff_dim {ed:.1f}/{null:.0f} null, "
+              f"sigreg {d.get('sigreg_ratio_last', 0):.1f}x null "
+              f"(lam={d.get('sigreg_lambda')})")
+    if d.get("passed"):
+        return DONE, detail
+    if "passed" not in d:
+        return PARTIAL, "dryrun.json predates the collapse check — re-run"
+    failed = [k for k in ("pred_loss_moved", "not_collapsed", "regularised") if not d.get(k)]
+    return PARTIAL, f"FAILED {'+'.join(failed)} — {detail}"
 
 
 def p_metrics():
@@ -351,7 +445,20 @@ def p_lambda_diff():
 # STAGE 4 — Control
 # =============================================================================
 def p_planner():
-    return _has_symbols("aqmario/plan.py", "macro_cem", "probe_cost")
+    """
+    plan.py must carry the planner, the probe-scored cost AND the steering hook.
+    Steering is in this file rather than reached for from `aquin steer`, which is
+    prompt-in/tokens-out and cannot touch a 192-dim ViT residual stream.
+    """
+    st, detail = _has_symbols("aqmario/plan.py", "MacroCEM", "rollout_cost",
+                              "steer_predictor")
+    if st != DONE:
+        return st, detail
+    txt = _src("aqmario/plan.py").read_text()
+    if "multinomial" not in txt:
+        return PARTIAL, ("planner is not sampling a categorical — Gaussian CEM "
+                         "over binary buttons was half of LeMario's failures")
+    return DONE, "MacroCEM (categorical), probe-scored cost, steer_predictor"
 
 
 def p_steer():
@@ -391,12 +498,15 @@ STAGES = [
            Check("collector", "collect_data.py emulator + logging", p_collector),
            Check("budget", "dataset size / shard RAM projection", p_data_budget),
            Check("modal", "modal_app.py CPU fan-out for data-gen", p_modal_data),
+           Check("tests", "Stage 1 eval suite passing", p_tests("ram", "config", "collect", "shards_e2e", "tracker"), 2),
+           Check("ppo", "PPO explorer for the back half of 1-1", p_ppo, 2),
            Check("shards", "episodes collected", p_shards, 2)]),
 
     Stage(2, "World model",
           "A ~15M JEPA that predicts 1-1 dynamics in 192-dim latent space.",
           "10+ epochs trained bf16, both losses moving, curves live in aquin watch.",
-          [Check("model", "model.py encoder + action-enc + AdaLN-Zero predictor", p_model),
+          [Check("data", "data.py windows + trajectory split", p_data_path),
+           Check("model", "model.py encoder + action-enc + AdaLN-Zero predictor", p_model),
            Check("losses", "losses.py SIGReg + aux heads", p_losses),
            Check("params", "parameter count in ~15M band", p_param_count),
            Check("dryrun", "single-shard dry run, both losses move", p_dryrun),
@@ -404,6 +514,7 @@ STAGES = [
            Check("watch", "aquin watch ingesting curves", p_watch),
            Check("aqmethod", "methods/jepa.py wired as recipe `method: jepa`", p_aq_method),
            Check("adapters", "aq_watch / aq_sae adapters", p_adapters),
+           Check("tests2", "Stage 2 eval suite passing", p_tests("data", "model", "losses"), 2),
            Check("epochs", "full run 10+ epochs", p_epochs, 2)]),
 
     Stage(3, "Gates + inspect",
@@ -414,6 +525,7 @@ STAGES = [
            Check("numbers", "gate thresholds met", p_gate_numbers, 2),
            Check("lemario", "beats LeMario's published numbers", p_beats_lemario, 2),
            Check("aqeval", "gate fails closed via recipe eval.min_score", p_aq_eval, 2),
+           Check("tests3", "Stage 3 eval suite passing", p_tests("gates"), 2),
            Check("latents", "latents dumped as chunk_*.pt", p_latents),
            Check("sae", "SAE trained per SIGReg lambda", p_saes),
            Check("lamdiff", "lambda-sweep feature diff table", p_lambda_diff, 2)]),

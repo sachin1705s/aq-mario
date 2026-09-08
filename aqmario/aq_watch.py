@@ -29,8 +29,25 @@ from pathlib import Path
 def effective_dim(z) -> float:
     """
     Participation ratio of the latent covariance spectrum: (sum L)^2 / sum(L^2).
-    192 means the latent is fully used; a collapse shows up here long before
-    pred_loss looks wrong.
+    A collapse shows up here long before pred_loss looks wrong.
+
+    RAW PR IS BIASED DOWN BY THE BATCH SIZE, badly. Read it without correcting
+    and you will report a collapse that is not happening. For n samples of a
+    genuinely full-rank D-dim Gaussian, Marchenko-Pastur gives E[L^2] = 1 + D/n,
+    so
+
+        E[PR] = n*D / (n + D)
+
+    which is not D unless n >> D. Measured against that formula at D=192:
+
+        n =   64   PR  47.1   formula  48.0
+        n =  384   PR 127.6   formula 128.0
+        n = 2048   PR 175.5   formula 175.5
+        n = 8192   PR 187.6   formula 187.6
+
+    So a training run at batch 64 (n = 64*6 = 384 latents) reads eff_dim 128 on a
+    perfectly healthy encoder. Use effective_dim_corrected() to compare across
+    batch sizes, or across the lambda sweep if the sweep ever changes batch size.
     """
     import torch
     z = z.detach().float()
@@ -39,6 +56,44 @@ def effective_dim(z) -> float:
     ev = torch.linalg.eigvalsh(cov).clamp_min(0)
     s = ev.sum()
     return float(s * s / ev.pow(2).sum().clamp_min(1e-12))
+
+
+def effective_dim_null(n: int, d: int) -> float:
+    """PR that a full-rank D-dim Gaussian actually produces from n samples."""
+    return n * d / (n + d)
+
+
+def effective_dim_corrected(z) -> float:
+    """
+    Invert the Marchenko-Pastur bias: PR = n*Deff/(n+Deff)  =>  Deff = PR*n/(n-PR).
+
+    Verified: recovers 192.0 +- 1 from n = 128..8192 on full-rank noise, and
+    stays at 7.6 on a rank-8 latent regardless of n. This is the number to put in
+    the writeup; the raw PR is the number to watch live.
+    """
+    pr = effective_dim(z)
+    n = int(z.shape[0])
+    return float(pr * n / max(1e-6, n - pr))
+
+
+def effective_dim_windowed(z) -> tuple[float, float, int]:
+    """
+    PR for a (B, W, D) training batch: computed per frame position and averaged,
+    so the Marchenko-Pastur correction uses n = B independent samples rather
+    than B*W correlated ones.
+
+    Returns (raw_pr, corrected, n_independent). Measured on a synthetic
+    FULL-RANK latent batched as 32 windows x 6 frames, the flattened PR reads
+    27.0 against an apparent null of 96 — which looks like a 3.5x collapse and
+    is not one.
+    """
+    import torch
+    if z.ndim == 2:
+        return effective_dim(z), effective_dim_corrected(z), int(z.shape[0])
+    B, W, _ = z.shape
+    prs = [effective_dim(z[:, w]) for w in range(W)]
+    pr = float(sum(prs) / W)
+    return pr, float(pr * B / max(1e-6, B - pr)), int(B)
 
 
 class MetricsWriter:

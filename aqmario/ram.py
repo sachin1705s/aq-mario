@@ -33,9 +33,13 @@ CANDIDATES = {
         "page_6D_fine_86": (0x006D, 0x0086),
     },
     "world_y": {
-        # 0x00CE = player y on screen; 0x00B5 = player vertical page ("HighPos")
+        # 0x00CE = player y on screen; 0x00B5 = player vertical page ("HighPos").
+        # MEASURED: info_y = -1.0 * world_y + 511 against the env's own y_pos,
+        # R^2 = 1.0000000000 over 300 frames. Exact, so this is the right pair.
         "page_B5_fine_CE": (0x00B5, 0x00CE),
-        # 0x03B8 is the other commonly cited player-y-on-screen byte
+        # 0x03B8 is the other commonly cited player-y byte. MEASURED: it is a
+        # MIRROR of 0x00CE — identical on all 120/120 frames tested — so it is
+        # equivalent, not an alternative. Kept so validate_ram.py reports the tie.
         "page_B5_fine_03B8": (0x00B5, 0x03B8),
     },
     "scroll": {
@@ -47,19 +51,66 @@ CANDIDATES = {
 # Locked-in choice. Set by scripts/validate_ram.py --lock after the trace passes.
 CHOSEN = {
     "world_x": "page_6D_fine_86",
-    "world_y": None,      # <- UNVALIDATED. run scripts/validate_ram.py
+    "world_y": "page_B5_fine_CE",
     "scroll":  "page_071A_fine_071C",
 }
 
-PLAYER_STATE = 0x000E          # 0x06, 0x0B = dying / dead
+# SIGN CONVENTION, measured not assumed: world_y is a SCREEN coordinate, so it
+# grows DOWNWARD. Standing on the ground in 1-1 reads 432; the apex of a jump
+# reads 346. Mario jumping makes world_y go DOWN by ~86 over ~28 emulator
+# frames. The planner's vertical cost and the SAE steering demo both depend on
+# this sign, so do not "fix" it to point the other way.
+GROUND_Y_1_1 = 432
+JUMP_APEX_Y_1_1 = 346
+
+PLAYER_STATE = 0x000E          # 0x06 = dead, 0x0B = dying animation
 POWER_STATE  = 0x0756          # 0=small, 1=big, 2=fire
+Y_VIEWPORT   = 0x00B5          # >1 means Mario has fallen below the stage
 DEAD_STATES  = (0x06, 0x0B)
+
+# gym-super-mario-bros defines death as:
+#     _is_dying = player_state == 0x0b or _y_viewport > 1
+#     _is_dead  = player_state == 0x06
+# The y_viewport clause is the PIT-FALL case, which player_state alone never
+# catches. Checking player_state only (as the original draft did) silently
+# mislabels every pit death as "alive".
 
 _LOCK_PATH = Path("~/.aqmario/ram_lock.json").expanduser()
 
 
 def _pair(ram, page_addr: int, fine_addr: int) -> int:
     return int(ram[page_addr]) * 256 + int(ram[fine_addr])
+
+
+def is_dead(ram) -> bool:
+    """Matches gym-super-mario-bros' own _is_dying or _is_dead, pit falls included."""
+    return int(ram[PLAYER_STATE]) in DEAD_STATES or int(ram[Y_VIEWPORT]) > 1
+
+
+def dies_within(alive, k: int):
+    """
+    Per-observation label: does the episode end in death within the next k
+    observations?
+
+    MEASURED: raw `alive` is 0 on ~0.007% of frames, because the episode
+    terminates the instant Mario dies — at most one or two dead frames exist per
+    episode. A BCE head on that label learns "always alive" and the dead-in-5
+    gate has nothing to measure. Rolling the label k steps BACKWARD turns a
+    coincident signal into a predictive one, which is what the gate actually
+    asks for.
+    """
+    import numpy as np
+    a = np.asarray(alive).astype(bool)
+    n = len(a)
+    out = np.zeros(n, dtype=np.uint8)
+    if n == 0:
+        return out
+    dead_idx = np.flatnonzero(~a)
+    horizon = dead_idx.min() if dead_idx.size else None
+    if horizon is None:
+        return out                      # episode never ended in death
+    out[max(0, horizon - k):] = 1
+    return out
 
 
 def load_lock() -> dict | None:
@@ -100,7 +151,7 @@ def ram_state(ram, chosen: dict | None = None) -> dict:
     y_page, y_fine = CANDIDATES["world_y"][c["world_y"]]
     world_y = _pair(ram, y_page, y_fine)
     scroll = _pair(ram, *CANDIDATES["scroll"][c["scroll"]])
-    alive = 0 if int(ram[PLAYER_STATE]) in DEAD_STATES else 1
+    alive = 0 if is_dead(ram) else 1
     return dict(
         world_x=world_x,
         world_y=world_y,
