@@ -57,6 +57,24 @@ class PlanConfig:
     subgoal_px: int = 200         # never ask the latent about a longer span
     temperature: float = 1.0
 
+    # ---- added after the first planner runs, all three measured -------------
+    # switch_penalty: px-equivalent charged per macro CHANGE within a plan. The
+    # visible symptom of a weak action signal is oscillation -- the best
+    # checkpoint separates run_right from run_left by +6.07 px of decoded x when
+    # the true effect is ~200 px, so candidate plans are nearly tied and CEM
+    # picks noise. Charging for direction changes breaks those ties toward
+    # committed motion instead of toward whichever candidate the probe happened
+    # to score highest.
+    switch_penalty: float = 0.0
+    # death_relative: rank candidates by risk instead of trusting the absolute
+    # probability. MEASURED: P(dead) reads 0.000 on every macro from predicted
+    # latents, so the death term contributes nothing and the planner has NO
+    # hazard avoidance at all -- which is why it falls off 1-3. Standardising
+    # risk across the candidate population restores the ordering without
+    # pretending the probe is calibrated, which it is not.
+    death_relative: bool = False
+    death_px: float = 60.0        # px-equivalent charged to a +1 sigma risk
+
 
 def rollout_cost(zhat, probes, goal_x=None, cfg=CFG, pcfg: PlanConfig | None = None):
     """
@@ -77,7 +95,13 @@ def rollout_cost(zhat, probes, goal_x=None, cfg=CFG, pcfg: PlanConfig | None = N
         progress = x_px[:, -1] - x_px[:, 0]
         risk = dead.max(dim=1).values
 
-        cost = -progress + pcfg.death_penalty * risk * 100.0
+        if pcfg.death_relative:
+            # z-scored within the candidate population: relative, unit-free, and
+            # honest about the probe being uncalibrated.
+            rz = (risk - risk.mean()) / risk.std().clamp_min(1e-6)
+            cost = -progress + pcfg.death_px * rz
+        else:
+            cost = -progress + pcfg.death_penalty * risk * 100.0
         if goal_x is not None:
             # Clamped to subgoal_px: beyond that the aliasing gate has not
             # certified the latent, so a larger residual is not more information.
@@ -148,6 +172,9 @@ class MacroCEM:
             idx = torch.multinomial(probs, P, replacement=True).T.contiguous()  # (P,H)
             zhat = self._score(z_ctx, idx, goal_x)
             cost, diag = rollout_cost(zhat, self.probes, goal_x, self.cfg, self.p)
+            if self.p.switch_penalty:
+                switches = (idx[:, 1:] != idx[:, :-1]).float().sum(dim=1)
+                cost = cost + self.p.switch_penalty * switches
             elite = idx[cost.argsort()[: self.p.elites]]                        # (E,H)
             counts = torch.zeros_like(logits)
             for h in range(H):

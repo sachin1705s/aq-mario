@@ -297,8 +297,14 @@ def p_metrics():
     p, rows = _latest_metrics()
     if not rows:
         return TODO, "no metrics.jsonl"
-    last = rows[-1]
-    keys = [k for k in ("pred_loss", "sigreg_loss", "eff_dim") if k in last]
+    # rows[-1] is NOT necessarily a step row. Every checkpoint appends a gate row
+    # carrying only gate_* keys, so on any run that ENDS on a checkpoint -- i.e.
+    # every completed run, since the last checkpoint is at 100% -- the final row
+    # has none of these keys and a finished 41,160-step run reported PARTIAL with
+    # a blank detail. Scan back for the last row that actually logged them.
+    want = ("pred_loss", "sigreg_loss", "eff_dim")
+    last = next((r for r in reversed(rows) if any(k in r for k in want)), rows[-1])
+    keys = [k for k in want if k in last]
     detail = " ".join(f"{k}={last[k]:.4g}" for k in keys if isinstance(last.get(k), (int, float)))
     return (DONE if len(keys) >= 2 else PARTIAL), f"{len(rows)} steps · {detail}"
 

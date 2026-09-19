@@ -12,6 +12,8 @@ training/gates/SAE/planning are GPU. Everything lands on Volumes so the stages
 compose. aq/aquin run alongside as the record-and-inspect layer — they provide
 no compute of their own (`aq job run --gpu` is a LOCAL subprocess runner).
 """
+import os
+
 import modal
 from pathlib import Path
 
@@ -54,7 +56,13 @@ gpu_image = (
     .add_local_dir("scripts", "/root/scripts")
 )
 
-app = modal.App("aq-mario", image=gpu_image)
+# App name is overridable so a NEW experiment can be deployed while existing runs
+# are still in flight. `modal deploy` replaces a deployed app's function
+# definitions, and pushing new code onto the app that is currently 55% through
+# two paid H100 runs is not a risk worth taking for a config flag -- deploy the
+# new arm as its own app against the SAME volumes instead:
+#     AQMARIO_APP=aq-mario-ema modal deploy modal_app.py
+app = modal.App(os.environ.get("AQMARIO_APP", "aq-mario"), image=gpu_image)
 data_vol = modal.Volume.from_name("aqmario-data", create_if_missing=True)
 runs_vol = modal.Volume.from_name("aqmario-runs", create_if_missing=True)
 VOLS = {"/data": data_vol, "/runs": runs_vol}
@@ -188,10 +196,30 @@ def stage1_data_ppo(episodes_per_shard: int = 250, shards: int = 16):
 
 
 # --- Stage 2: world model -- one GPU ----------------------------------------
+def _resolve_resume(resume: str, tag: str) -> str:
+    """"" -> fresh, "auto" -> this tag's jepa.pt if it exists, else an explicit path."""
+    from pathlib import Path as P
+    if resume != "auto":
+        return resume
+    ck = P(f"/runs/{tag}/jepa.pt")
+    if not ck.is_file():
+        print(f"[train] resume=auto but no {ck} — starting fresh", flush=True)
+        return ""
+    import torch
+    if torch.load(ck, map_location="cpu", weights_only=False).get("complete"):
+        print(f"[train] resume=auto but {ck} is already a COMPLETED run — "
+              f"refusing to append to a finished trajectory. Use a new run_tag.",
+              flush=True)
+        raise SystemExit(0)
+    return str(ck)
+
+
 @app.function(volumes=VOLS, gpu="H100", cpu=16.0, memory=65536,
               timeout=8 * 60 * 60, secrets=AQUIN)
 def train(variant: str = "aux", epochs: int = 3, sigreg_lambda: float = 10.0,
-          batch_size: int = 96, stop_grad: bool = True, aux_scale: float = 20.0):
+          batch_size: int = 96, stop_grad: bool = True, aux_scale: float = 20.0,
+          run_tag: str = "", gate_abort: bool = True, resume: str = "",
+          ema: float = 0.0, inv_real: float = 0.0, inv_pred: float = 0.0):
     """
     cpu=16 is not optional: at 224px the loader must decompress ~200 GB/epoch,
     and one core decompresses at ~300 MB/s. Fewer cores idles the H100.
@@ -208,14 +236,35 @@ def train(variant: str = "aux", epochs: int = 3, sigreg_lambda: float = 10.0,
     CFG.loss.variant = variant
     CFG.loss.sigreg_lambda = sigreg_lambda
     CFG.loss.aux_scale = aux_scale
-    tag = f"{variant}_lam{sigreg_lambda}_aux{aux_scale:g}_{'sg' if stop_grad else 'nosg'}"
+    CFG.loss.inv_real_lambda = inv_real
+    CFG.loss.inv_pred_lambda = inv_pred
+    tag = run_tag or (f"{variant}_lam{sigreg_lambda}_aux{aux_scale:g}_"
+                      + (f"ema{ema:g}" if ema > 0 else ('sg' if stop_grad else 'nosg')))
     CFG.run_dir = Path(f"/runs/{tag}")
     s = train_jepa("/data", out_weights=f"/runs/{tag}/jepa.pt", epochs=epochs,
                    batch_size=batch_size, num_workers=12,
                    run_dir=f"/runs/{tag}", cfg=CFG,
                    stop_grad_target=stop_grad,
+                   ema_target=ema,
+                   inv_dyn=(inv_real > 0 or inv_pred > 0),
                    checkpoint_every_frac=0.10,   # 10 look-ins, not 3
-                   gate_grace_frac=0.35)         # probes need ~a third of the run
+                   gate_grace_frac=0.35,         # probes need ~a third of the run
+                   # gate_abort=False keeps every 10% probe MEASURED and logged
+                   # but declaws GateAbort. That is right for exactly one thing:
+                   # the `pure` control arm. Its y-probe read -0.383 at 4%, so an
+                   # armed gate kills it at 35% by design -- and then the open
+                   # question ("does a pure JEPA catch up given a full schedule?")
+                   # stays open forever, because the only run that could answer it
+                   # is the one the gate keeps stopping. The abort exists to save
+                   # money on a doomed PRODUCTION run; the control is not one.
+                   # Left True everywhere else, where a sinking y-probe is a
+                   # regression and not the measurement.
+                   gate_abort_y_r2=(0.10 if gate_abort else -1e9),
+                   # "auto" = pick up this tag's own last checkpoint if there is
+                   # one. Safe as a default because the tag IS the run identity:
+                   # a fresh tag has nothing to resume, and a repeated tag is by
+                   # definition the same run being continued.
+                   resume=_resolve_resume(resume, tag))
     s["ckpt"] = f"/runs/{tag}/jepa.pt"
     # The 10% health table is the thing to look at before trusting anything else.
     print(f"\n{'%':>5}{'y_probe':>10}{'x_probe':>10}{'pred':>9}{'gain5':>8}"
@@ -234,11 +283,31 @@ def train(variant: str = "aux", epochs: int = 3, sigreg_lambda: float = 10.0,
 
 @app.local_entrypoint()
 def stage2_train(variant: str = "aux", epochs: int = 3, sigreg_lambda: float = 10.0,
-                 batch_size: int = 96, stop_grad: bool = True, aux_scale: float = 20.0):
-    s = train.remote(variant=variant, epochs=epochs, sigreg_lambda=sigreg_lambda,
-                     batch_size=batch_size, stop_grad=stop_grad, aux_scale=aux_scale)
-    print(s)
-    print(f"\nnow gate it:\n  modal run modal_app.py::stage3_gates --ckpt {s.get('ckpt')}")
+                 batch_size: int = 96, stop_grad: bool = True, aux_scale: float = 20.0,
+                 run_tag: str = "", gate_abort: bool = True, resume: str = "auto",
+                 ema: float = 0.0, inv_real: float = 0.0, inv_pred: float = 0.0,
+                 wait: bool = False):
+    """
+    SPAWN, NOT REMOTE. `.remote()` blocks this client for the whole run and a
+    client kill cancels the call server-side: both arms of the first full run
+    died that way, 11 seconds apart, at steps 6050 and 3340 of 37251, with every
+    loss healthy. `--detach` does not save a blocking local entrypoint. `.spawn()`
+    hands the work to Modal and returns an id, so the run outlives this process
+    by construction rather than by flag.
+    """
+    fc = train.spawn(variant=variant, epochs=epochs, sigreg_lambda=sigreg_lambda,
+                     batch_size=batch_size, stop_grad=stop_grad, aux_scale=aux_scale,
+                     run_tag=run_tag, gate_abort=gate_abort, resume=resume, ema=ema,
+                     inv_real=inv_real, inv_pred=inv_pred)
+    tag = run_tag or f"{variant}_lam{sigreg_lambda}_aux{aux_scale:g}_{'sg' if stop_grad else 'nosg'}"
+    print(f"SPAWNED {tag}  function_call_id={fc.object_id}")
+    print(f"  logs:   modal app logs {app.app_id}")
+    print(f"  resume: modal run modal_app.py::stage2_train --run-tag {tag} "
+          f"--variant {variant}   (resume=auto picks up /runs/{tag}/jepa.pt)")
+    if wait:
+        s = fc.get()
+        print(s)
+        print(f"\nnow gate it:\n  modal run modal_app.py::stage3_gates --ckpt {s.get('ckpt')}")
 
 
 # The dry run is the Stage 2 exit check for "does it learn at all", and it is
@@ -455,6 +524,265 @@ def stage3_sweep(epochs: int = 12):
 
 
 # --- Stage 4: control -------------------------------------------------------
+@app.function(volumes=VOLS, gpu="A10G", cpu=4.0, timeout=60 * 60)
+def plan_diag(ckpt: str, n_states: int = 6):
+    """
+    Decompose the planner's cost, per macro, on REAL held-out states.
+
+    The sanity plan advanced Mario -1 px in 60 macros and spent 50 of them on
+    `jump` and `run_left`. Two explanations fit that: the risk term drowning the
+    progress term, or the x-probe being too noisy on PREDICTED latents to give
+    the progress term any signal. They call for opposite fixes, so this measures
+    which it is instead of picking one.
+
+    For each macro, hold it for the whole horizon and report what rollout_cost
+    actually computes: progress in px, P(dead), and the two terms in the units
+    they are summed in.
+    """
+    import sys
+    sys.path.insert(0, "/root")
+    import numpy as np, torch
+    from aqmario import data as D
+    from aqmario.config import CFG, MACRO_NAMES
+    from aqmario.model import load_jepa
+    from aqmario.plan import MacroCEM, PlanConfig, rollout_cost
+    sys.path.insert(0, "/root/scripts")
+    from run_plan import fit_frozen_probes
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    model = load_jepa(ckpt, cfg=CFG).to(dev)
+    probes = fit_frozen_probes(model, "/data", cfg=CFG, device=dev)
+    pcfg = PlanConfig()
+    planner = MacroCEM(model, probes, pcfg, device=dev)
+
+    paths = D.shard_paths(Path("/data"))
+    _, val = D.split_episodes(paths, CFG.gate.probe_trajectories, seed=0)
+    H = CFG.model.history_len
+    rows = []
+    with np.load(val[0][0]) as d:
+        base = val[0][2]
+        for si in range(n_states):
+            s0 = base + 20 + si * 40
+            frames = torch.from_numpy(d["frames"][s0:s0 + H]).to(dev)
+            z_ctx = model.encoder(frames.unsqueeze(0))[0]
+            for mi, name in enumerate(MACRO_NAMES):
+                idx = torch.full((1, pcfg.horizon), mi, dtype=torch.long, device=dev)
+                zhat = planner._score(z_ctx, idx, None)
+                cost, diag = rollout_cost(zhat, probes, None, CFG, pcfg)
+                rows.append(dict(state=si, macro=name,
+                                 progress_px=float(diag["progress"][0]),
+                                 risk=float(diag["risk"][0]),
+                                 death_term=float(pcfg.death_penalty * diag["risk"][0] * 100.0),
+                                 cost=float(cost[0])))
+    print(f"\n{'macro':<18}{'progress_px':>13}{'P(dead)':>10}{'death_term':>12}{'cost':>10}")
+    for name in MACRO_NAMES:
+        rs = [r for r in rows if r["macro"] == name]
+        m = lambda k: sum(r[k] for r in rs) / len(rs)
+        print(f"{name:<18}{m('progress_px'):>13.1f}{m('risk'):>10.3f}"
+              f"{m('death_term'):>12.1f}{m('cost'):>10.1f}")
+    prog = [abs(r["progress_px"]) for r in rows]
+    dth = [r["death_term"] for r in rows]
+    print(f"\nspread of |progress| across macros: {max(prog)-min(prog):.1f} px")
+    print(f"spread of death_term across macros:  {max(dth)-min(dth):.1f} px-equivalent")
+    print(f"-> the term with the LARGER spread is the one choosing the macro")
+    return rows
+
+
+@app.function(volumes=VOLS, gpu="A10G", cpu=4.0, timeout=60 * 60)
+def action_sensitivity(ckpt: str, n_states: int = 12):
+    """
+    Does the PREDICTOR respond to actions, and can the x-probe READ that response?
+
+    plan_diag showed the planner's progress term is nearly macro-independent
+    (`wait` +107 px, `run_left` +110.5 px, `run_right` +108.2 px). Two very
+    different faults produce that, and they need opposite fixes:
+
+      A. the predictor ignores the action    -> latents under run_right and
+                                                run_left are nearly identical
+      B. the probe cannot read the action    -> latents DIFFER but the x-probe
+                                                maps them to the same number
+
+    So measure both: the latent distance between opposite-action rollouts, in
+    units of the latent's own scale, AND what the probe decodes from each.
+    A real reference point is needed for "is this distance big", so it is
+    compared against the distance between two DIFFERENT real frames.
+    """
+    import sys
+    sys.path.insert(0, "/root")
+    import numpy as np, torch
+    from aqmario import data as D
+    from aqmario.config import CFG, MACRO_NAMES
+    from aqmario.model import load_jepa
+    from aqmario.plan import MacroCEM, PlanConfig
+    sys.path.insert(0, "/root/scripts")
+    from run_plan import fit_frozen_probes
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    model = load_jepa(ckpt, cfg=CFG).to(dev)
+    probes = fit_frozen_probes(model, "/data", cfg=CFG, device=dev)
+    pcfg = PlanConfig()
+    planner = MacroCEM(model, probes, pcfg, device=dev)
+    ri, li = MACRO_NAMES.index("run_right"), MACRO_NAMES.index("run_left")
+
+    paths = D.shard_paths(Path("/data"))
+    _, val = D.split_episodes(paths, CFG.gate.probe_trajectories, seed=0)
+    H = CFG.model.history_len
+    out = []
+    with np.load(val[0][0]) as d:
+        base = val[0][2]
+        for si in range(n_states):
+            s0 = base + 20 + si * 25
+            fr = torch.from_numpy(d["frames"][s0:s0 + H]).to(dev)
+            z_ctx = model.encoder(fr.unsqueeze(0))[0]
+            zs = {}
+            for nm, mi in (("right", ri), ("left", li)):
+                idx = torch.full((1, pcfg.horizon), mi, dtype=torch.long, device=dev)
+                zs[nm] = planner._score(z_ctx, idx, None)[0]     # (Hz, D)
+            d_act = float((zs["right"] - zs["left"]).norm(dim=-1).mean())
+            # reference: distance between two real consecutive-ish latents
+            f2 = torch.from_numpy(d["frames"][s0 + 8:s0 + 8 + H]).to(dev)
+            z2 = model.encoder(f2.unsqueeze(0))[0]
+            d_real = float((z_ctx - z2).norm(dim=-1).mean())
+            xr = float(D.denormalize("world_x", probes["world_x"](zs["right"]).squeeze(-1)).mean())
+            xl = float(D.denormalize("world_x", probes["world_x"](zs["left"]).squeeze(-1)).mean())
+            out.append(dict(state=si, latent_dist_right_vs_left=d_act,
+                            latent_dist_real_frames_8_apart=d_real,
+                            probe_x_right=xr, probe_x_left=xl,
+                            probe_x_gap=xr - xl,
+                            true_x=int(d["world_x"][s0 + H - 1])))
+    return out
+
+
+@app.function(volumes=VOLS, gpu="A10G", cpu=8.0, timeout=4 * 60 * 60)
+def plan_sweep(ckpt: str, episodes: int = 2, max_macros: int = 400):
+    """
+    Planner-side ablation on ONE checkpoint. No retraining.
+
+    The model's action signal is +6.07 px of decoded x between run_right and
+    run_left, against a true effect of roughly 200. This asks how much of the
+    planner's wandering is the weak signal itself and how much is the planner
+    mishandling it. Probes are fit ONCE and shared, so every config sees an
+    identical model, identical probes and identical seeds -- the only variable is
+    the planner.
+
+    horizon 5 matters structurally, not as a tuning knob: pred_horizon is 5, so
+    an 8-macro plan is rolled in CHUNKS with predictions fed back as context, and
+    the compounding lands exactly where the signal is weakest.
+    """
+    import sys, json
+    from pathlib import Path as P
+    sys.path.insert(0, "/root"); sys.path.insert(0, "/root/scripts")
+    import torch
+    from aqmario.config import CFG
+    from aqmario.model import load_jepa
+    from aqmario.plan import PlanConfig
+    from run_plan import fit_frozen_probes, rollout_episode
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    model = load_jepa(ckpt, cfg=CFG).to(dev)
+    probes = fit_frozen_probes(model, "/data", cfg=CFG, device=dev)
+
+    configs = {
+        "baseline (h8)":            dict(horizon=8),
+        "h5":                       dict(horizon=5),
+        "h5 + switch40":            dict(horizon=5, switch_penalty=40.0),
+        "h5 + switch40 + deathz":   dict(horizon=5, switch_penalty=40.0,
+                                         death_relative=True, death_px=60.0),
+        "h5 + switch80 + deathz":   dict(horizon=5, switch_penalty=80.0,
+                                         death_relative=True, death_px=60.0),
+        "h5 + sw40 + dz + big CEM": dict(horizon=5, switch_penalty=40.0,
+                                         death_relative=True, death_px=60.0,
+                                         population=512, elites=64, iters=6),
+    }
+    out = []
+    for name, kw in configs.items():
+        pcfg = PlanConfig(**kw)
+        xs = []
+        for ep in range(episodes):
+            r = rollout_episode(model, probes, pcfg, max_macros=max_macros,
+                                seed=ep, device=dev, goal_ahead=pcfg.subgoal_px)
+            xs.append(r["max_world_x"])
+        row = dict(config=name, xs=xs, best=max(xs), mean=sum(xs) / len(xs))
+        out.append(row)
+        print(f"[sweep] {name:<28} best {row['best']:>5}  mean {row['mean']:>7.1f}  {xs}",
+              flush=True)
+    tag = P(ckpt).parent.name
+    (P(f"/runs/{tag}") / "plan_sweep.json").write_text(json.dumps(out, indent=2))
+    runs_vol.commit()
+    return out
+
+
+@app.function(volumes=VOLS, gpu="A10G", cpu=8.0, timeout=4 * 60 * 60)
+def plan_video(ckpt: str, levels: str = "1-1", episodes: int = 2,
+               max_macros: int = 400, tag_suffix: str = ""):
+    """
+    Plan with the world model across several episodes and levels, and record all
+    of it into ONE annotated gif.
+
+    LEVELS OTHER THAN 1-1 ARE OUT OF DISTRIBUTION AND THE OVERLAY SAYS SO. Every
+    one of the 8,000 training episodes is World 1-1 (CFG.data.level, "stay on ONE
+    level until it works"), and the x / dies-in-5 probes that form the planner's
+    cost were fit on 1-1 latents. A run on 1-2 is therefore testing two different
+    things at once -- whether the dynamics transfer AND whether the probes do --
+    and it is a generalisation probe, not a demo of the system working.
+    """
+    import json, subprocess, sys
+    from pathlib import Path as P
+    sys.path.insert(0, "/root"); sys.path.insert(0, "/root/scripts")
+    import numpy as np, torch
+    from aqmario.config import CFG
+    from aqmario.model import load_jepa
+    from aqmario.plan import PlanConfig
+    from run_plan import fit_frozen_probes, rollout_episode, FLAGPOLE_X
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    model = load_jepa(ckpt, cfg=CFG).to(dev)
+    # Probes are fit ONCE, on 1-1, and reused for every level -- deliberately.
+    # Refitting per level would need labelled data for that level, which does not
+    # exist here, and would also hide the question being asked.
+    probes = fit_frozen_probes(model, "/data", cfg=CFG, device=dev)
+    pcfg = PlanConfig()
+
+    tag = P(ckpt).parent.name
+    out = P(f"/runs/{tag}")
+    lv = [x.strip() for x in levels.split(",") if x.strip()]
+    results, segments = [], []
+    for level in lv:
+        CFG.data.level = f"SuperMarioBros-{level}-v0"
+        for ep in range(episodes):
+            rec = []
+            r = rollout_episode(model, probes, pcfg, max_macros=max_macros,
+                                seed=ep, record=rec, device=dev,
+                                goal_ahead=pcfg.subgoal_px)
+            r.update(level=level, episode=ep, n_frames=len(rec))
+            results.append(r)
+            segments.append((level, ep, rec, r))
+            print(f"[video] {level} ep{ep}: x {r['max_world_x']}  macros {r['macros']}",
+                  flush=True)
+
+    from PIL import Image, ImageDraw
+    ims, budget = [], 1100
+    total = sum(max(1, len(rec)) for _, _, rec, _ in segments) or 1
+    stride = max(1, total // budget)
+    for level, ep, rec, r in segments:
+        for o, x, name in rec[::stride]:
+            im = Image.fromarray(o).resize((384, 360), Image.NEAREST)
+            dr = ImageDraw.Draw(im)
+            dr.rectangle([0, 316, 384, 360], fill=(0, 0, 0))
+            ood = "" if level == "1-1" else "  OUT-OF-DISTRIBUTION"
+            dr.text((6, 320), f"World {level}  ep{ep}{ood}", fill=(255, 220, 80))
+            dr.text((6, 336), f"x={x}  macro={name}", fill=(255, 255, 255))
+            ims.append(im)
+    name = f"plan_video{tag_suffix}.gif"
+    if ims:
+        ims[0].save(out / name, save_all=True, append_images=ims[1:],
+                    duration=60, loop=0)
+        print(f"[video] wrote {out / name} ({len(ims)} frames)", flush=True)
+    (out / f"plan_video{tag_suffix}.json").write_text(json.dumps(results, indent=2))
+    runs_vol.commit()
+    return results
+
+
 @app.function(volumes=VOLS, gpu="A10G", cpu=4.0, timeout=4 * 60 * 60)
 def plan(ckpt: str, sae_path: str = "", episodes: int = 3):
     """Emulator + GPU in one container: CEM rolls out in latent space, the

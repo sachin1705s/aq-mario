@@ -97,7 +97,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from aqmario.config import CFG
+from aqmario.config import CFG, N_BUTTONS
 
 
 # ---- SIGReg -----------------------------------------------------------------
@@ -254,8 +254,82 @@ def aux_loss(heads: AuxHeads, z: torch.Tensor, batch: dict, cfg=CFG) -> dict:
     }
 
 
+# ---- Inverse dynamics -------------------------------------------------------
+class InverseDynamics(nn.Module):
+    """
+    (z_t, z_t+1) -> the 6 buttons that caused the transition.
+
+    Kept OUT of AuxHeads deliberately. AuxHeads is saved under the checkpoint's
+    "aux" key and reloaded with strict=True by model.load_jepa, so adding
+    parameters to it would make every checkpoint trained before today fail to
+    load -- including the three runs whose gate numbers are the current results.
+    This is its own module under its own key.
+    """
+
+    def __init__(self, cfg=CFG, hidden: int = 256):
+        super().__init__()
+        d = cfg.model.latent_dim
+        self.net = nn.Sequential(nn.Linear(2 * d, hidden), nn.GELU(),
+                                 nn.Linear(hidden, N_BUTTONS))
+
+    def forward(self, z_a, z_b):
+        return self.net(torch.cat([z_a, z_b], dim=-1))
+
+
+def inverse_dynamics(cfg=CFG) -> InverseDynamics:
+    return InverseDynamics(cfg)
+
+
+def inverse_dynamics_loss(inv: InverseDynamics, out: dict, batch: dict,
+                          cfg=CFG) -> dict:
+    """
+    Two BCE terms, both predicting the action from the latents around it.
+
+    INDEXING, which is the whole correctness of this function. Per data/README,
+    `actions[i]` CAUSED `frames[i]`, and a window starting at s carries
+    `actions[s+1 .. s+W-1]`. So within a window, `batch["actions"][:, j]` is the
+    action that caused window frame j+1, i.e. it is the action of the transition
+    j -> j+1. Getting this off by one trains the head to predict the action from
+    the pair it did NOT act on, which still produces a falling loss because
+    consecutive actions are correlated -- a silent near-miss, exactly the failure
+    the action alignment note in data/README warns about.
+
+    The buttons are reduced over the frame_skip block with amax: a button counts
+    as pressed if it was held for either emulator frame in the block.
+    """
+    if inv is None:
+        z = out["z"]
+        zero = z.sum() * 0
+        return {"inv_real": zero, "inv_pred": zero}
+
+    z, zhat = out["z"], out["zhat"]
+    H = cfg.model.history_len
+    a = batch["actions"]                              # (B, W-1, skip, 6)
+    tgt = a.amax(dim=2).float()                       # (B, W-1, 6)
+
+    lam_r = getattr(cfg.loss, "inv_real_lambda", 0.0)
+    lam_p = getattr(cfg.loss, "inv_pred_lambda", 0.0)
+    terms = {}
+
+    if lam_r > 0:
+        logit = inv(z[:, :-1], z[:, 1:])              # (B, W-1, 6)
+        terms["inv_real"] = lam_r * F.binary_cross_entropy_with_logits(logit, tgt)
+    else:
+        terms["inv_real"] = z.sum() * 0
+
+    if lam_p > 0:
+        # frames H-1 .. W-1 as (real context tail, then the predictions)
+        seq = torch.cat([z[:, H - 1:H], zhat], dim=1)  # (B, P+1, D)
+        logit = inv(seq[:, :-1], seq[:, 1:])           # (B, P, 6)
+        terms["inv_pred"] = lam_p * F.binary_cross_entropy_with_logits(
+            logit, tgt[:, H - 1:H - 1 + zhat.shape[1]])
+    else:
+        terms["inv_pred"] = z.sum() * 0
+    return terms
+
+
 # ---- Total ------------------------------------------------------------------
-def jepa_loss(out: dict, heads: AuxHeads, batch: dict, cfg=CFG) -> dict:
+def jepa_loss(out: dict, heads: AuxHeads, batch: dict, cfg=CFG, inv=None) -> dict:
     """
     out: dict from JEPA.forward. Returns every term separately AND the total,
     because the two diagnostic failure signatures are only visible term by term.
@@ -282,6 +356,8 @@ def jepa_loss(out: dict, heads: AuxHeads, batch: dict, cfg=CFG) -> dict:
             terms[f"gain_{h}step"] = 1 - m / var
         terms["z_var"] = var
     terms.update(aux_loss(heads, z, batch, cfg=cfg))
+    terms.update(inverse_dynamics_loss(inv, out, batch, cfg=cfg))
     terms["loss"] = pred + cfg.loss.sigreg_lambda * sr + \
-        terms["aux_y"] + terms["aux_scroll"] + terms["aux_dead"]
+        terms["aux_y"] + terms["aux_scroll"] + terms["aux_dead"] + \
+        terms["inv_real"] + terms["inv_pred"]
     return terms

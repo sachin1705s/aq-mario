@@ -33,7 +33,7 @@ import torch
 from aqmario.aq_watch import MetricsWriter, effective_dim_windowed
 from aqmario.config import CFG
 from aqmario import data as D
-from aqmario.losses import aux_heads, jepa_loss
+from aqmario.losses import aux_heads, inverse_dynamics, jepa_loss
 from aqmario.model import build_jepa
 
 
@@ -64,7 +64,7 @@ def checkpoint_health(hist, gate_hist, cfg=CFG) -> dict:
     # checkpoint, so a missing key here is a crash 40% into a paid run. A health
     # report that cannot see a metric should say so, not take the run down.
     if gate_hist:
-        for k in ("y_probe_r2", "x_probe_r2", "scroll_probe_r2"):
+        for k in ("y_probe_r2", "x_probe_r2", "scroll_probe_r2", "action_effect_ratio"):
             if k in gate_hist[-1]:
                 cur[k] = gate_hist[-1][k]
     prev = gate_hist[-2] if len(gate_hist) > 1 else None
@@ -101,7 +101,7 @@ def _epoch_gate(model, val_eps, cfg, device, n_traj=24, max_obs=300, bn_batches=
     be cheap enough that nobody is tempted to switch it off. The full-strength
     version is scripts/run_gates.py on the saved checkpoint.
     """
-    from aqmario.gates import encode_episodes, probe_gate
+    from aqmario.gates import action_conditioning_gate, encode_episodes, probe_gate
     from aqmario.model import recalibrate_bn
 
     # NOT decorated @torch.no_grad(). encode_episodes already carries it for the
@@ -124,7 +124,18 @@ def _epoch_gate(model, val_eps, cfg, device, n_traj=24, max_obs=300, bn_batches=
         half = max(2, len(eps) // 2)
         tr = encode_episodes(model, eps[:half][:n_traj], cfg, device, max_obs_per_episode=max_obs)
         va = encode_episodes(model, eps[half:][:n_traj], cfg, device, max_obs_per_episode=max_obs)
-        return probe_gate(tr, va, cfg, device=str(device))
+        res = probe_gate(tr, va, cfg, device=str(device))
+        # Action conditioning, probe-free so it is cheap enough for a tripwire.
+        # A model that ignores its actions passes every probe above and is still
+        # useless to a planner; without this the run reports "healthy" for 2.5 h
+        # and the failure only appears when CEM oscillates. Never fatal here --
+        # it is reported, and the full gate is the one that fails closed.
+        try:
+            res.update(action_conditioning_gate(model, eps[half:], None, cfg,
+                                                device=str(device), n_states=6))
+        except Exception as exc:
+            res["action_gate_error"] = f"{type(exc).__name__}: {exc}"
+        return res
     finally:
         if was_training:
             model.train()
@@ -160,7 +171,8 @@ def train_jepa(data_dir, out_weights, epochs=12, batch_size=64, lr=3e-4,
                max_steps=None, log_every=10, val_trajectories=None,
                device=None, seed=0, stop_grad_target=False,
                gate_every_epoch=True, gate_abort_y_r2=0.10,
-               checkpoint_every_frac=0.10, gate_grace_frac=0.35):
+               checkpoint_every_frac=0.10, gate_grace_frac=0.35, resume="",
+               ema_target=0.0, inv_dyn=True):
     torch.manual_seed(seed)
     device = device or pick_device()
     run_dir = Path(run_dir or (cfg.run_dir / time.strftime("run_%Y%m%d_%H%M%S")))
@@ -175,16 +187,77 @@ def train_jepa(data_dir, out_weights, epochs=12, batch_size=64, lr=3e-4,
     loader = D.make_loader(train_eps, batch_size=batch_size,
                            num_workers=num_workers, cfg=cfg, seed=seed)
 
-    model = build_jepa(cfg, stop_grad_target=stop_grad_target).to(device)
+    model = build_jepa(cfg, stop_grad_target=stop_grad_target,
+                       ema_target=ema_target).to(device)
     heads = aux_heads(cfg).to(device)
+    inv = None
+    if inv_dyn and (getattr(cfg.loss, "inv_real_lambda", 0) > 0
+                    or getattr(cfg.loss, "inv_pred_lambda", 0) > 0):
+        inv = inverse_dynamics(cfg).to(device)
     params = model.param_report()
     params["aux_heads"] = sum(p.numel() for p in heads.parameters())
     params["total"] += params["aux_heads"]
+    if inv is not None:
+        params["inv_dyn"] = sum(p.numel() for p in inv.parameters())
+        params["total"] += params["inv_dyn"]
     (cfg.run_dir).mkdir(parents=True, exist_ok=True)
     (cfg.run_dir / "param_count.json").write_text(json.dumps(params, indent=2))
 
-    opt = torch.optim.AdamW(list(model.parameters()) + list(heads.parameters()),
-                            lr=lr, weight_decay=0.05, betas=(0.9, 0.95))
+    # requires_grad filter, not model.parameters(): the EMA teacher is frozen, and
+    # handing its tensors to AdamW gives it weight-decay state and decays weights
+    # that ema_update() then overwrites -- a silent no-op that still costs memory.
+    opt = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad] + list(heads.parameters())
+        + (list(inv.parameters()) if inv is not None else []),
+        lr=lr, weight_decay=0.05, betas=(0.9, 0.95))
+
+    # ---- resume ---------------------------------------------------------------
+    # A 2.7 h run that loses its client dies at whatever step it had reached, and
+    # without this the only options are "pay for it again from zero" or "publish
+    # numbers from 16% of a schedule". Both happened on this project already.
+    #
+    # THE OPTIMIZER STATE IS PART OF THE CHECKPOINT, not an extra. AdamW's second
+    # moment takes hundreds of steps to re-warm; resuming weights alone puts a
+    # visible step-change in pred_loss at the seam and makes the curve a record of
+    # the interruption rather than of the training. Restored: weights, aux heads,
+    # optimizer moments, the global step (so the cosine schedule is continuous),
+    # the epoch, the recalibrated total_steps and the gate history.
+    #
+    # NOT restored: the loader's position inside the epoch. ShardWindows reshuffles
+    # shard AND window order every pass off self._epoch, so there is no position to
+    # return to -- resuming re-draws from the same distribution, which is what a
+    # shuffled stream means. That is honest for a stochastic sampler and is the
+    # standard practice; it is not exact-state resumption and should not be called it.
+    start_epoch, resumed_total, gate_hist_resumed, resumed = 0, None, [], False
+    if resume:
+        rp = Path(resume)
+        if not rp.is_file():
+            raise SystemExit(f"--resume {rp} does not exist")
+        blob = torch.load(rp, map_location=device, weights_only=False)
+        model.load_state_dict(blob["jepa"])
+        if "aux" in blob:
+            heads.load_state_dict(blob["aux"])
+        if inv is not None and "invdyn" in blob:
+            inv.load_state_dict(blob["invdyn"])
+        if "opt" in blob:
+            opt.load_state_dict(blob["opt"])
+        else:
+            print(f"[train] WARNING {rp} predates optimizer checkpointing — "
+                  f"AdamW moments restart cold and the loss will bump at the seam",
+                  flush=True)
+        resumed = True
+        resume_step = int(blob.get("step", 0))
+        start_epoch = int(blob.get("epoch", 0))
+        resumed_total = blob.get("total_steps")
+        gp = run_dir / "gate_by_epoch.json"
+        if gp.is_file():
+            try:
+                gate_hist_resumed = json.loads(gp.read_text())
+            except json.JSONDecodeError:
+                pass
+        print(f"[train] resumed {rp.name} at step {resume_step} epoch {start_epoch} "
+              f"({len(gate_hist_resumed)} prior gates, "
+              f"opt state {'restored' if 'opt' in blob else 'COLD'})", flush=True)
 
     # Windows per epoch is not known until a shard is opened, so the cosine
     # schedule is length-estimated from the episode table rather than len(loader)
@@ -198,18 +271,31 @@ def train_jepa(data_dir, out_weights, epochs=12, batch_size=64, lr=3e-4,
     # count once epoch 0 has actually happened; the estimate only has to be
     # good enough to get through the first epoch.
     total_steps = max_steps or max(1, epochs * est_windows // max(1, batch_size))
+    if resumed and resumed_total:
+        total_steps = int(resumed_total)
 
     mw = MetricsWriter(run_dir)
-    step, hist, gate_hist = 0, [], []
+    step, hist, gate_hist = 0, [], list(gate_hist_resumed)
+    if resumed:
+        step = resume_step
     ckpt_every = max(1, int(total_steps * checkpoint_every_frac))
     bn_buffer = deque(maxlen=48)          # recent frames, for BN re-estimation
     t0 = time.time()
+    tgt_branch = (f"ema({ema_target})" if ema_target > 0
+                  else ("stop_grad" if stop_grad_target else "shared"))
     print(f"[train] {len(train_eps)} train eps / {len(val_eps)} held-out, "
           f"~{est_windows} windows, {total_steps} steps, {params['total']/1e6:.1f}M params, "
           f"batch {batch_size}, lam {cfg.loss.sigreg_lambda}, "
-          f"stop_grad={stop_grad_target}, device={device.type}", flush=True)
+          f"target={tgt_branch}, "
+          f"inv_dyn={'off' if inv is None else f'{cfg.loss.inv_real_lambda:g}/{cfg.loss.inv_pred_lambda:g}'}, "
+          f"device={device.type}", flush=True)
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
+        # Counted per epoch, not read off the global `step`: on a resumed run
+        # `step` already carries the pre-interruption steps, and using it to
+        # derive steps-per-epoch would inflate total_steps and flatten the
+        # cosine schedule for the rest of the run.
+        epoch_start_step = step
         for batch in loader:
             for g in opt.param_groups:
                 g["lr"] = _cosine_lr(step, total_steps, lr)
@@ -219,12 +305,14 @@ def train_jepa(data_dir, out_weights, epochs=12, batch_size=64, lr=3e-4,
             bn_buffer.append(batch["frames"])
             with _autocast(device, precision):
                 out = model(batch["frames"], batch["actions"])
-                terms = jepa_loss(out, heads, batch, cfg=cfg)
+                terms = jepa_loss(out, heads, batch, cfg=cfg, inv=inv)
             opt.zero_grad(set_to_none=True)
             terms["loss"].backward()
             gn = torch.nn.utils.clip_grad_norm_(
-                list(model.parameters()) + list(heads.parameters()), 1.0)
+                list(model.parameters()) + list(heads.parameters())
+                + (list(inv.parameters()) if inv is not None else []), 1.0)
             opt.step()
+            model.ema_update()          # no-op unless ema_target > 0
 
             if step % log_every == 0:
                 pr, pr_c, n_ind = effective_dim_windowed(out["z"].detach())
@@ -249,9 +337,13 @@ def train_jepa(data_dir, out_weights, epochs=12, batch_size=64, lr=3e-4,
             if ckpt_every and step % ckpt_every == 0 and hist:
                 frac = step / max(1, total_steps)
                 blob = {"jepa": model.state_dict(), "aux": heads.state_dict(),
+                        "opt": opt.state_dict(),
+                        **({"invdyn": inv.state_dict()} if inv is not None else {}),
                         "cfg_variant": cfg.loss.variant,
                         "sigreg_lambda": cfg.loss.sigreg_lambda,
-                        "epoch": epoch, "step": step, "frac": frac}
+                        "ema_target": ema_target, "stop_grad": stop_grad_target,
+                        "epoch": epoch, "step": step, "frac": frac,
+                        "total_steps": total_steps, "epochs": epochs}
                 torch.save(blob, out_weights)
                 torch.save(blob, out_weights.with_name(
                     f"{out_weights.stem}_p{int(round(frac * 100)):03d}.pt"))
@@ -268,7 +360,8 @@ def train_jepa(data_dir, out_weights, epochs=12, batch_size=64, lr=3e-4,
                 flag = "OK " if h["healthy"] else "WARN"
                 print(f"  [{int(round(frac*100)):3d}%] {flag} "
                       f"y {h.get('y_probe_r2', float('nan')):+.4f} "
-                      f"x {h.get('x_probe_r2', float('nan')):+.4f} | "
+                      f"x {h.get('x_probe_r2', float('nan')):+.4f} "
+                      f"act {gate_hist[-1].get('action_effect_ratio', float('nan')):.3f} | "
                       f"pred {h['pred_loss']:.4f} gain5 {h['gain_5step']:+.3f} "
                       f"eff_dim {h['eff_dim']:.1f} sigreg {h['sigreg_ratio']:.1f}x"
                       + ("" if h["healthy"] else "  <- " + ",".join(
@@ -297,18 +390,24 @@ def train_jepa(data_dir, out_weights, epochs=12, batch_size=64, lr=3e-4,
         if max_steps and step >= max_steps:
             break
 
-        if epoch == 0 and not max_steps:
+        if epoch == 0 and not max_steps and not resumed:
             # Real steps-per-epoch is now known; rebuild the schedule around it.
-            total_steps = max(1, epochs * step)
+            per_epoch = step - epoch_start_step
+            total_steps = max(1, epochs * per_epoch)
             ckpt_every = max(1, int(total_steps * checkpoint_every_frac))
-            print(f"[train] recalibrated: {step} steps/epoch -> {total_steps} total "
+            print(f"[train] recalibrated: {per_epoch} steps/epoch -> {total_steps} total "
                   f"(estimate was {epochs * est_windows // batch_size}), "
                   f"checkpoint+gate every {ckpt_every} steps", flush=True)
 
     torch.save({"jepa": model.state_dict(), "aux": heads.state_dict(),
+                "opt": opt.state_dict(),
+                **({"invdyn": inv.state_dict()} if inv is not None else {}),
                 "cfg_variant": cfg.loss.variant,
                 "sigreg_lambda": cfg.loss.sigreg_lambda,
-                "epoch": epochs - 1}, out_weights)
+                "ema_target": ema_target, "stop_grad": stop_grad_target,
+                "epoch": epochs - 1, "step": step,
+                "total_steps": total_steps, "epochs": epochs,
+                "complete": True}, out_weights)
     mw.close()
 
     last = hist[-1] if hist else {}

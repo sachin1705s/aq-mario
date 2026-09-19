@@ -115,7 +115,12 @@ def rollout_episode(model, probes, pcfg, max_macros=400, seed=0, record=None,
                 if done:
                     break
             hist.append(prep(obs))
-            if record is not None and len(record) < 900:
+            # Cap raised from 900: at max_macros 2000 a 1-1 episode runs past it
+            # and the recording stops a third of the way in, so the video shows
+            # only the opening of a run that kept going. The gif writer already
+            # subsamples to a frame budget, so a larger cap costs memory here and
+            # nothing in the output.
+            if record is not None and len(record) < 3000:
                 record.append((obs.copy(), int(info.get("x_pos", 0)), name))
             macros += 1
             max_x = max(max_x, int(info.get("x_pos", 0)))

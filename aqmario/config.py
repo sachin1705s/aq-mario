@@ -133,6 +133,26 @@ class LossConfig:
     aux_alive_lambda: float = 0.02          # dead-in-N signal
     aux_scale: float = 1.0                  # global multiplier on the three above
 
+    # ---- inverse dynamics ---------------------------------------------------
+    # Predict the ACTION that caused a transition, from the two latents around
+    # it. Added after the first fully-trained checkpoint was measured to ignore
+    # its actions entirely (effect ratio 0.041, probe x-gap -3.2 px), which made
+    # every CEM candidate look identical and stalled the planner at x=435/3161.
+    #
+    # THIS IS NOT SUPERVISION IN THE SENSE `variant: aux` IS. The aux heads read
+    # RAM state (world_y, scroll, dies_in_5) that the model is otherwise never
+    # told. Inverse dynamics uses only frames and actions -- both already inputs
+    # to the model -- so a `pure` run with these lambdas on is still fully
+    # self-supervised and the claim survives.
+    #
+    # inv_real acts on consecutive REAL latents and forces the ENCODER to keep
+    # action-discriminative information, which makes z_target itself differ by
+    # action so the predictor has something to gain from reading `a`.
+    # inv_pred acts on (z, zhat) pairs and is the direct fix: it makes the
+    # PREDICTOR's output depend on the action or the term cannot be minimised.
+    inv_real_lambda: float = 1.0
+    inv_pred_lambda: float = 1.0
+
     # Stage 3 lambda-sweep. NOTE: this is SIGReg lambda, so each value is a FULL
     # training run (~3.2 h H100, ~$17), not a cheap SAE refit. Budget accordingly.
     sigreg_sweep: tuple = (0.01, 0.1, 0.5)
@@ -152,6 +172,21 @@ class GateConfig:
     # saturation point on the first trained checkpoint is also ~200, so the gate
     # and the planner are asking the same question.
     aliasing_px_usable: int = 200
+    # ---- action conditioning ------------------------------------------------
+    # MEASURED on the first fully-trained checkpoint (41,160 steps, aux variant):
+    # rolling `run_right` for 8 macros vs `run_left` for 8 macros moved the
+    # predicted latent by 0.759, against 18.325 between two real frames 8 steps
+    # apart -- a ratio of 0.041. The predictor was ignoring the action, and the
+    # planner therefore oscillated (164 rights, 120 lefts) and stalled at
+    # x=435/3161.
+    #
+    # Nothing caught it. tests/test_model.py asserts the AdaLN-Zero gradient path
+    # UNSTICKS at step 1, which is necessary and not sufficient: gradient
+    # reaching the action encoder does not mean the converged model uses it.
+    # This is the sufficient version, and it is a GATE because a world model that
+    # ignores actions is not a world model, however good its probes look.
+    min_action_effect_ratio: float = 0.25   # ||z_a - z_b|| / ||z between real frames||
+    min_action_x_gap_px: float = 20.0       # probe-decoded x, run_right minus run_left
     probe_val_frac: float = 0.2
     probe_trajectories: int = 60            # Bai's split protocol, for comparability
 

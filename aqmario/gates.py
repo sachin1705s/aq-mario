@@ -400,6 +400,83 @@ def _bn_frame_batches(episodes, device, cfg=CFG, batch=64, max_batches=60):
 
 
 # ---- runner -----------------------------------------------------------------
+def action_conditioning_gate(model, episodes, probe_x=None, cfg=CFG, device="cpu",
+                             n_states=12, horizon=8) -> dict:
+    """
+    Does the predictor actually CONDITION on the action?
+
+    Roll the same context forward under `run_right` held for `horizon` macros and
+    under `run_left` held for `horizon` macros, and measure how far apart the two
+    predicted latents end up. On its own that number means nothing -- latent
+    space has no natural scale -- so it is reported RELATIVE to the distance
+    between two real frames `horizon` steps apart, which is the amount of latent
+    motion the same span of real gameplay produces.
+
+    Also decoded through the frozen x-probe: right-minus-left should be a large
+    POSITIVE number of pixels. A near-zero or negative gap means that even if the
+    latents differ, nothing downstream can read the difference -- and the planner
+    reads exactly this quantity.
+
+    WHY THIS IS A GATE AND NOT A DIAGNOSTIC. A model that ignores its actions
+    still trains beautifully: the prediction loss falls, SIGReg holds, every
+    probe passes, because none of those ask the action to matter. It fails only
+    at the planner, which is months of work later -- which is the same lateness
+    this whole project exists to eliminate.
+    """
+    from aqmario.plan import MacroCEM, PlanConfig
+    from aqmario.config import MACRO_NAMES
+
+    pcfg = PlanConfig()
+    pcfg.horizon = horizon
+    planner = MacroCEM(model, {"world_x": probe_x}, pcfg, cfg=cfg, device=device)
+    ri, li = MACRO_NAMES.index("run_right"), MACRO_NAMES.index("run_left")
+    H = cfg.model.history_len
+
+    ratios, gaps = [], []
+    by_shard: dict = {}
+    for e in episodes:
+        by_shard.setdefault(e[0], []).append(e)
+    taken = 0
+    for path, eps in by_shard.items():
+        if taken >= n_states:
+            break
+        with np.load(path) as d:
+            for _, _, s0e, s1e in eps:
+                if taken >= n_states:
+                    break
+                s0 = s0e + 20
+                if s0 + horizon + H >= s1e:
+                    continue
+                fr = torch.from_numpy(np.ascontiguousarray(d["frames"][s0:s0 + H])).to(device)
+                with torch.no_grad():
+                    z_ctx = model.encoder(fr.unsqueeze(0))[0]
+                    zs = {}
+                    for nm, mi in (("r", ri), ("l", li)):
+                        idx = torch.full((1, horizon), mi, dtype=torch.long, device=device)
+                        zs[nm] = planner._score(z_ctx, idx, None)[0]
+                    d_act = float((zs["r"] - zs["l"]).norm(dim=-1).mean())
+                    f2 = torch.from_numpy(
+                        np.ascontiguousarray(d["frames"][s0 + horizon:s0 + horizon + H])).to(device)
+                    z2 = model.encoder(f2.unsqueeze(0))[0]
+                    d_real = float((z_ctx - z2).norm(dim=-1).mean())
+                    if probe_x is not None:
+                        xr = float(D.denormalize("world_x", probe_x(zs["r"]).squeeze(-1)).mean())
+                        xl = float(D.denormalize("world_x", probe_x(zs["l"]).squeeze(-1)).mean())
+                        gaps.append(xr - xl)
+                ratios.append(d_act / max(1e-9, d_real))
+                taken += 1
+    if not ratios:
+        return {"action_effect_ratio": float("nan"), "action_x_gap_px": float("nan"),
+                "action_n_states": 0}
+    # The ratio needs no probe, so the in-loop tripwire can have it for free and
+    # report action-blindness at 10% of a run instead of after it. The x-gap does
+    # need one and is NaN without it -- and NaN fails the gate, which is right:
+    # the full gate must never pass on the half of the measurement it skipped.
+    return {"action_effect_ratio": float(np.mean(ratios)),
+            "action_x_gap_px": float(np.mean(gaps)) if gaps else float("nan"),
+            "action_n_states": len(ratios)}
+
+
 def run_all_gates(weights, data_dir, cfg=CFG, device=None, seed=0,
                   max_obs_per_episode=600, out_json=None) -> dict:
     """
@@ -440,6 +517,18 @@ def run_all_gates(weights, data_dir, cfg=CFG, device=None, seed=0,
     res.update(probe_gate(tr, va, cfg, device=device))
     res.update(dead_in_5_gate(tr, va, cfg, device=device))
     res.update(aliasing_gate(va, cfg))
+    # Needs the fitted x-probe, so it runs after probe_gate. Uses the SAME frozen
+    # probe the planner would use, on the SAME held-out episodes.
+    try:
+        px, _ = _fit_probe(tr["z"], torch.from_numpy(tr["world_x"]),
+                           va["z"][:8], torch.from_numpy(va["world_x"][:8]), device=device)
+        for q in px.parameters():
+            q.requires_grad_(False)
+        res.update(action_conditioning_gate(model, val_eps, px.eval(), cfg, device=device))
+    except Exception as exc:                       # never let a diagnostic kill the gate run
+        res["action_gate_error"] = f"{type(exc).__name__}: {exc}"
+        res["action_effect_ratio"] = float("nan")
+        res["action_x_gap_px"] = float("nan")
     res.update(aliasing_curve(va, cfg))
     res["aliasing_usable_range"] = aliasing_usable_range(res.get("aliasing_curve", []))
 
@@ -450,6 +539,10 @@ def run_all_gates(weights, data_dir, cfg=CFG, device=None, seed=0,
         # The GATING criterion is the sub-goal-range one; `aliasing_margin` is
         # still computed and reported, and still fails. See the note below.
         "aliasing": bool(res.get("aliasing_usable_range", 0) >= cfg.gate.aliasing_px_usable),
+        # NaN fails, deliberately: an action gate that could not be computed is
+        # not a passed action gate.
+        "action": bool(res.get("action_effect_ratio", float("nan")) >= cfg.gate.min_action_effect_ratio
+                       and res.get("action_x_gap_px", float("nan")) >= cfg.gate.min_action_x_gap_px),
     }
     res["aliasing_margin_strict_fails"] = bool(
         res["aliasing_margin"] < cfg.gate.min_aliasing_margin)

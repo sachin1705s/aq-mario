@@ -1,0 +1,1319 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>AQ-Mario, Explained From Scratch</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  :root{
+    --ink:#14140f; --ink2:#44443c; --ink3:#6f6f64; --rule:#dcdcd2;
+    --surface:#fcfcfb; --panel:#f4f4ee; --panel2:#ecece4;
+    --s1:#2a78d6; --s2:#eb6834; --s3:#4a3aa7; --s4:#1baf7a;
+    --good:#1e7a46; --bad:#c0392b; --warn:#a86a00;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--surface);color:var(--ink);
+    font:12pt/1.62 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:185mm;margin:0 auto;padding:0 2mm}
+  h1,h2,h3,h4{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;letter-spacing:-.015em;line-height:1.2}
+  h1{font-size:30pt;margin:0 0 6pt}
+  h2{font-size:19pt;margin:0 0 4pt;padding-top:2pt}
+  h3{font-size:13.5pt;margin:20pt 0 5pt}
+  h4{font-size:11.5pt;margin:14pt 0 3pt;color:var(--ink2)}
+  p{margin:0 0 9pt}
+  a{color:var(--s1);text-decoration:none;border-bottom:.5pt solid #b9d0ee}
+  code,.mono{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:9.6pt;
+    background:var(--panel);padding:1pt 3.5pt;border-radius:3pt}
+  .part{page-break-before:always;padding-top:4pt}
+  .lede{font-size:13pt;color:var(--ink2);margin-bottom:14pt}
+  .kicker{font:600 8.5pt/1 "Helvetica Neue",Arial,sans-serif;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--s1);margin-bottom:7pt}
+  .rule{height:1pt;background:var(--rule);margin:12pt 0}
+  figure{margin:14pt 0;page-break-inside:avoid}
+  figcaption{font:10pt/1.45 "Helvetica Neue",Arial,sans-serif;color:var(--ink3);margin-top:5pt}
+  figcaption b{color:var(--ink2)}
+  table{border-collapse:collapse;width:100%;font:10pt/1.4 "Helvetica Neue",Arial,sans-serif;margin:10pt 0}
+  th,td{text-align:left;padding:4.5pt 6pt;border-bottom:.5pt solid var(--rule)}
+  th{font-weight:650;color:var(--ink2);border-bottom:1pt solid #c8c8bc}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .box{background:var(--panel);border-radius:5pt;padding:10pt 13pt;margin:12pt 0;page-break-inside:avoid}
+  .box.tip{background:#eef5fd;border-left:2.5pt solid var(--s1)}
+  .box.warnb{background:#fdf2e9;border-left:2.5pt solid var(--s2)}
+  .box.keyb{background:#f0eef8;border-left:2.5pt solid var(--s3)}
+  .box h4{margin-top:0}
+  dl.gloss{margin:0}
+  dl.gloss dt{font:650 11pt/1.4 "Helvetica Neue",Arial,sans-serif;margin-top:11pt;color:var(--ink)}
+  dl.gloss dd{margin:2pt 0 0;color:var(--ink2)}
+  dl.gloss dd .full{color:var(--s3);font-weight:600}
+  .toc{font:10.5pt/1.9 "Helvetica Neue",Arial,sans-serif;columns:2;column-gap:16mm}
+  .toc a{border:0;color:var(--ink)}
+  .toc .n{color:var(--s1);font-weight:650;margin-right:5pt}
+  .win{color:var(--good);font-weight:650}
+  .lose{color:var(--bad);font-weight:650}
+  .cover{height:250mm;display:flex;flex-direction:column;justify-content:center}
+  .cover h1{font-size:42pt;line-height:1.04}
+  .meta{font:10pt/1.7 "Helvetica Neue",Arial,sans-serif;color:var(--ink3);margin-top:20pt}
+  svg{display:block;max-width:100%;height:auto}
+  .sub{font:9.5pt/1.4 "Helvetica Neue",Arial,sans-serif;color:var(--ink3)}
+  ul,ol{margin:0 0 9pt;padding-left:16pt} li{margin-bottom:4pt}
+</style></head><body><div class="wrap">
+
+<section class="cover">
+  <div class="kicker">A complete, plain-language walkthrough</div>
+  <h1>AQ-Mario:<br>teaching a computer to<br>imagine a video game</h1>
+  <p class="lede" style="margin-top:14pt;max-width:135mm">
+    We trained four artificial neural networks to predict what happens next in a
+    platform video game, measured what they actually learned inside, discovered
+    that three of them were quietly broken in a way nobody had checked for, and
+    built an automatic test that catches it. Every number in this document was
+    measured, not estimated.
+  </p>
+  <div class="meta">
+    Experiment run 9&ndash;10 September 2026 &middot; 4 training runs &middot; 164,640 training steps total<br>
+    ~10 GPU-hours on NVIDIA H100 hardware &middot; 8,000 gameplay episodes &middot; 4.88 million frames<br>
+    Repository: <span class="mono">/Users/sachin/aq-mario</span>
+  </div>
+</section>
+
+<section class="part">
+  <div class="kicker">Contents</div>
+  <h2>What is in this document</h2>
+  <div class="rule"></div>
+  <div class="toc">
+    <div><span class="n">1</span><a href="#one">The one-paragraph version</a></div>
+    <div><span class="n">2</span><a href="#words">Every word explained</a></div>
+    <div><span class="n">3</span><a href="#why">Why a video game?</a></div>
+    <div><span class="n">4</span><a href="#worldmodel">What a world model is</a></div>
+    <div><span class="n">5</span><a href="#jepa">JEPA: predicting ideas, not pixels</a></div>
+    <div><span class="n">6</span><a href="#data">The data: 8,000 lives</a></div>
+    <div><span class="n">7</span><a href="#arch">Inside the machine</a></div>
+    <div><span class="n">8</span><a href="#collapse">The cheating problem</a></div>
+    <div><span class="n">9</span><a href="#probe">Probes: reading a mind</a></div>
+    <div><span class="n">10</span><a href="#four">The four experiments</a></div>
+    <div><span class="n">11</span><a href="#results">Results</a></div>
+    <div><span class="n">12</span><a href="#gates">Gates: automatic alarms</a></div>
+    <div><span class="n">13</span><a href="#discovery">The discovery</a></div>
+    <div><span class="n">14</span><a href="#planner">Playing the game</a></div>
+    <div><span class="n">15</span><a href="#learned">What we learned</a></div>
+    <div><span class="n">16</span><a href="#numbers">All the numbers</a></div>
+    <div><span class="n">17</span><a href="#links">Links &amp; further reading</a></div>
+  </div>
+</section>
+
+<section class="part" id="one">
+  <div class="kicker">Section 1</div>
+  <h2>The one-paragraph version</h2>
+  <div class="rule"></div>
+  <p class="lede">Imagine teaching someone to play a video game by only ever letting
+  them watch, never telling them any rules.</p>
+
+  <p>We showed a computer program eight thousand recorded playthroughs of a platform
+  game level. For each moment it saw the screen and which buttons were held. We never
+  told it where the character was, whether it was jumping, or whether it was about to
+  die. Its only job was to <b>predict what the next few moments would look like</b>.</p>
+
+  <p>Then we opened it up and asked: did it figure out, on its own, where the character
+  is on the screen? A previous project called <b>LeMario</b> had tried this and found
+  the answer was mostly no &mdash; it scored <b>0.188</b> on a 0-to-1 scale for knowing
+  the character's height. That is close to knowing nothing.</p>
+
+  <p>We reproduced that failure, found <b>why</b> it happens, fixed it with a
+  well-known trick called a <b>momentum teacher</b>, and got <b>0.590</b> &mdash; more
+  than three times better, still without telling the model anything. Adding cheap
+  hints pushed it to <b>0.962</b>.</p>
+
+  <div class="box keyb">
+    <h4>Then we found something nobody had checked</h4>
+    <p style="margin:0">Every one of our models was ignoring the buttons. It had learned
+    to predict the future from <i>momentum alone</i> &mdash; like guessing where a
+    rolling ball goes without noticing anyone kicking it. All the existing tests passed.
+    We built the test that catches it, and that test correctly predicted, in advance,
+    which models could actually play the game.</p>
+  </div>
+</section>
+<section class="part" id="words">
+  <div class="kicker">Section 2</div>
+  <h2>Every word explained</h2>
+  <div class="rule"></div>
+  <p class="lede">Nothing here is assumed. Every abbreviation gets its full form and
+  a plain-English meaning. Skim it now, come back when a word appears later.</p>
+
+  <h3>The big ideas</h3>
+  <dl class="gloss">
+    <dt>JEPA</dt>
+    <dd><span class="full">Joint Embedding Predictive Architecture.</span> A design where
+    a model predicts the future as a <i>summary</i> (an "embedding") rather than as actual
+    pixels. Like predicting "she will be near the door" instead of painting the exact
+    picture of her at the door. "Joint embedding" means both the past and the future get
+    turned into summaries by the same summariser.</dd>
+
+    <dt>World model</dt>
+    <dd>A program that has learned how an environment behaves, so it can imagine
+    "if I do <i>this</i>, what happens?" without actually trying it. Your own ability
+    to predict that a dropped mug will break is a world model.</dd>
+
+    <dt>Latent / latent space / embedding</dt>
+    <dd>"Latent" means hidden. The model squashes a 224&times;224 colour picture
+    (150,528 numbers) down to <b>192 numbers</b>. That list of 192 numbers is the
+    latent, and the space of all such lists is latent space. Think of it as the
+    model's private shorthand for "what is on screen right now".</dd>
+
+    <dt>Self-supervised</dt>
+    <dd>Learning without an answer key. Nobody labels the data. The model invents its
+    own exercise &mdash; here, "predict the next moment" &mdash; and grades itself.
+    This matters enormously for our claim: if the model learns where the character is
+    <i>without being told</i>, that is a discovery. If we told it, it is just obedience.</dd>
+
+    <dt>Probe</dt>
+    <dd>A tiny separate model we train <i>afterwards</i> to read one fact out of the
+    frozen latent. It answers: "is this information in there at all?" The big model is
+    never changed by this &mdash; the probe is a thermometer, not a heater.</dd>
+  </dl>
+
+  <h3>Measurements</h3>
+  <dl class="gloss">
+    <dt>R&sup2;</dt>
+    <dd><span class="full">Coefficient of determination.</span> How much of something you
+    can explain. <b>1.0</b> = perfect. <b>0.0</b> = no better than always guessing the
+    average. <b>Negative</b> = worse than guessing the average, which is a real and
+    common outcome and we report it honestly rather than hiding it at zero.</dd>
+
+    <dt>MSE</dt>
+    <dd><span class="full">Mean Squared Error.</span> Average of (guess &minus; truth)&sup2;.
+    Squaring punishes big misses much harder than small ones.</dd>
+
+    <dt>BCE</dt>
+    <dd><span class="full">Binary Cross-Entropy.</span> The scoring rule for yes/no
+    questions, like "will this end badly within 5 steps?"</dd>
+
+    <dt>AUC &amp; AP</dt>
+    <dd><span class="full">Area Under the Curve</span> and <span class="full">Average
+    Precision.</span> Two ways to score a rare-event detector. We use them because the
+    event we care about happens in <b>0.96%</b> of frames &mdash; a detector that always
+    says "fine" would be 99% accurate and completely useless, so plain accuracy is
+    banned in this project.</dd>
+
+    <dt>Effective dimension (eff_dim)</dt>
+    <dd>Of the 192 numbers in the latent, how many are <i>actually doing work</i>?
+    If the model cheats by making every screen look identical, this collapses toward 1.
+    Healthy runs here sit around 28&ndash;35.</dd>
+
+    <dt>OOD</dt>
+    <dd><span class="full">Out Of Distribution.</span> Anything the model was never
+    trained on. We trained only on one level, so every other level is OOD and results
+    there mean something different.</dd>
+  </dl>
+
+  <h3>Machinery</h3>
+  <dl class="gloss">
+    <dt>SIGReg</dt>
+    <dd><span class="full">Sketched Isotropic Gaussian Regularisation.</span> From the
+    LeJEPA paper. A mathematical nudge that keeps the 192 numbers spread out in a nice
+    round cloud instead of collapsing into a dot. "Isotropic" = the same in all
+    directions; "Gaussian" = bell-curve shaped.</dd>
+
+    <dt>EMA</dt>
+    <dd><span class="full">Exponential Moving Average.</span> A slow-moving average that
+    remembers the past. We keep a second copy of the model that lags behind the one being
+    trained &mdash; the "momentum teacher". This single change was our biggest win.</dd>
+
+    <dt>Stop-gradient</dt>
+    <dd>Telling the model "you may look at this, but you may not change it." Used to
+    stop a specific kind of cheating, at a cost we eventually measured.</dd>
+
+    <dt>ViT</dt>
+    <dd><span class="full">Vision Transformer.</span> A neural network that chops an
+    image into a grid of small patches (here 14&times;14 pixels each) and lets every
+    patch compare itself to every other patch. "Tiny" is the smallest standard size.</dd>
+
+    <dt>AdaLN-Zero</dt>
+    <dd><span class="full">Adaptive Layer Normalisation, Zero-initialised.</span> The
+    mechanism by which button presses influence the prediction. "Zero-initialised" means
+    it starts switched off and has to learn to switch itself on &mdash; which turns out
+    to be central to this whole story.</dd>
+
+    <dt>BN</dt>
+    <dd><span class="full">Batch Normalisation.</span> Rescales numbers so they stay in
+    a sensible range. It keeps running averages that go stale during training, which is
+    why we refresh them before every measurement.</dd>
+
+    <dt>CEM</dt>
+    <dd><span class="full">Cross-Entropy Method.</span> A planning algorithm. Guess 256
+    random button sequences, imagine each one with the world model, keep the best 32,
+    guess 256 more that look like those, repeat. It is evolution by natural selection,
+    run four times, inside imagination.</dd>
+
+    <dt>PPO</dt>
+    <dd><span class="full">Proximal Policy Optimisation.</span> A standard reinforcement
+    learning algorithm. We used it only to <i>generate</i> half the training data, never
+    as part of the world model.</dd>
+
+    <dt>AdamW</dt>
+    <dd><span class="full">Adam with decoupled Weight decay.</span> The optimiser &mdash;
+    the part that actually adjusts the model's millions of internal numbers.</dd>
+
+    <dt>bf16</dt>
+    <dd><span class="full">Brain Floating Point, 16 bits.</span> A compact number format
+    that trades precision for range. We use it instead of the more common fp16 because
+    SIGReg subtracts two nearly-equal numbers, and fp16 loses almost all its accuracy
+    doing that.</dd>
+
+    <dt>Epoch / step / batch</dt>
+    <dd>A <b>batch</b> is 96 examples looked at together. A <b>step</b> is one adjustment
+    of the model after one batch. An <b>epoch</b> is one full pass through all the data.
+    Our runs: 3 epochs, 41,160 steps.</dd>
+  </dl>
+
+  <h3>Infrastructure</h3>
+  <dl class="gloss">
+    <dt>GPU, H100, A10G</dt>
+    <dd><span class="full">Graphics Processing Unit.</span> Chips that do thousands of
+    multiplications at once. <b>H100</b> is a fast expensive one (training); <b>A10G</b>
+    is a slower cheap one (measuring).</dd>
+    <dt>Modal</dt>
+    <dd>A service that rents GPUs by the second and runs your code on them.</dd>
+    <dt>RAM (of the console)</dt>
+    <dd><span class="full">Random Access Memory.</span> The emulated console's memory.
+    We read the true character position straight out of it &mdash; this is our ground
+    truth, used <i>only</i> for grading, never for training.</dd>
+    <dt>Checkpoint</dt>
+    <dd>A saved snapshot of the model mid-training. We save ten per run, one every 10%.</dd>
+  </dl>
+</section>
+
+<section class="part" id="why">
+  <div class="kicker">Section 3</div>
+  <h2>Why a video game?</h2>
+  <div class="rule"></div>
+  <p class="lede">Because it is the rare case where we can check the model's homework
+  perfectly.</p>
+
+  <p>The hard part of studying what a neural network "understands" is that you usually
+  cannot verify it. If a model watches videos of city streets, and you want to know
+  whether it has internally represented "how far away that car is", there is no way to
+  get the true answer for every frame.</p>
+
+  <p>An emulated games console is different. The console's memory holds the exact
+  character position as a number. We can read it for <b>every single frame</b>, perfectly,
+  for free. So we can ask "does the model know where the character is?" and get an
+  unarguable answer.</p>
+
+  <div class="box tip">
+    <h4>The rule we never broke</h4>
+    <p style="margin:0">Those true positions are used <b>only to grade</b> the model,
+    never to train it. The moment you train on them, a good score stops meaning
+    "it figured this out" and starts meaning "we told it". One of our four experiments
+    deliberately breaks this rule, and we report it separately for exactly that reason.</p>
+  </div>
+
+  <p>We used one level of a classic side-scrolling platform game, running in an emulator.
+  The character runs right, jumps over gaps and hazards, and the camera follows. The goal
+  post is <b>3,161 pixels</b> from the start.</p>
+</section>
+<section class="part" id="worldmodel">
+  <div class="kicker">Section 4</div>
+  <h2>What a world model is</h2>
+  <div class="rule"></div>
+  <p class="lede">A world model answers hypothetical questions about the future without
+  having to live through them.</p>
+
+  <p>Before you cross a road, you do not step out and find out. You <i>imagine</i>
+  stepping out, imagine the car arriving, and decide not to. That imagining machine is
+  a world model. It takes <b>where things are now</b> plus <b>what you might do</b> and
+  produces <b>what would happen</b>.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 210" role="img" aria-label="Diagram: current state plus action produces predicted next state">
+      <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+        <path d="M0,0 L9,4.5 L0,9 z" fill="#6f6f64"/></marker></defs>
+      <rect x="8" y="46" width="150" height="104" rx="7" fill="#f4f4ee" stroke="#dcdcd2"/>
+      <text x="83" y="72" text-anchor="middle" font-family="Helvetica" font-size="12" font-weight="650" fill="#44443c">What is true now</text>
+      <rect x="36" y="86" width="94" height="46" rx="4" fill="#fff" stroke="#dcdcd2"/>
+      <rect x="46" y="116" width="74" height="8" fill="#e6e6dc"/>
+      <rect x="60" y="98" width="15" height="15" rx="3" fill="#2a78d6"/>
+      <text x="83" y="146" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">the screen</text>
+      <rect x="8" y="158" width="150" height="44" rx="7" fill="#f4f4ee" stroke="#dcdcd2"/>
+      <text x="83" y="176" text-anchor="middle" font-family="Helvetica" font-size="12" font-weight="650" fill="#44443c">What I might do</text>
+      <text x="83" y="192" text-anchor="middle" font-family="Helvetica" font-size="10" fill="#6f6f64">hold RIGHT + JUMP</text>
+      <line x1="162" y1="110" x2="215" y2="110" stroke="#6f6f64" stroke-width="1.6" marker-end="url(#ar)"/>
+      <line x1="162" y1="180" x2="200" y2="180" stroke="#6f6f64" stroke-width="1.6"/>
+      <path d="M200,180 Q215,180 215,140" stroke="#6f6f64" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+      <rect x="222" y="62" width="180" height="90" rx="7" fill="#eef5fd" stroke="#2a78d6" stroke-width="1.4"/>
+      <text x="312" y="100" text-anchor="middle" font-family="Helvetica" font-size="15" font-weight="650" fill="#2a78d6">WORLD MODEL</text>
+      <text x="312" y="120" text-anchor="middle" font-family="Helvetica" font-size="10.5" fill="#44443c">the imagining machine</text>
+      <line x1="406" y1="107" x2="460" y2="107" stroke="#6f6f64" stroke-width="1.6" marker-end="url(#ar)"/>
+      <rect x="468" y="46" width="150" height="104" rx="7" fill="#f4f4ee" stroke="#dcdcd2"/>
+      <text x="543" y="72" text-anchor="middle" font-family="Helvetica" font-size="12" font-weight="650" fill="#44443c">What would happen</text>
+      <rect x="496" y="86" width="94" height="46" rx="4" fill="#fff" stroke="#dcdcd2" stroke-dasharray="3 2"/>
+      <rect x="506" y="116" width="74" height="8" fill="#e6e6dc"/>
+      <rect x="540" y="92" width="15" height="15" rx="3" fill="#2a78d6" opacity=".55"/>
+      <text x="543" y="146" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">imagined, not real</text>
+      <text x="543" y="176" text-anchor="middle" font-family="Helvetica" font-size="10" fill="#6f6f64">higher up, further right</text>
+      <text x="543" y="192" text-anchor="middle" font-family="Helvetica" font-size="10" fill="#6f6f64">&mdash; the jump worked</text>
+    </svg>
+    <figcaption><b>Figure 1.</b> The shape of every world model. The blue square is a
+    stand-in for the player character. Notice the third box is dashed: it never happened.
+    That is the entire value &mdash; you get to find out without paying the price.</figcaption>
+  </figure>
+
+  <p>If a world model is accurate, you can chain it: imagine ten button presses ahead,
+  try a thousand different sequences, and pick the one that ends up best. That is
+  planning, and it is what we attempt in Section 14.</p>
+</section>
+
+<section class="part" id="jepa">
+  <div class="kicker">Section 5</div>
+  <h2>JEPA: predicting ideas, not pixels</h2>
+  <div class="rule"></div>
+  <p class="lede">The obvious way to build this is to predict the next picture. The
+  obvious way is a trap.</p>
+
+  <p>If you ask a model to draw the next frame exactly, it must get every cloud, every
+  brick texture, every flicker right. Almost all of that effort goes into details that
+  do not matter for deciding whether to jump. Worse, the parts that <i>do</i> matter
+  &mdash; where the character is &mdash; are a tiny fraction of the pixels, so getting
+  them wrong barely hurts the score.</p>
+
+  <p><b>JEPA</b> (Joint Embedding Predictive Architecture) changes the target. Both the
+  past and the future get squashed into 192-number summaries first, and the prediction
+  happens <i>between summaries</i>. The model never draws anything.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 250" role="img" aria-label="Diagram comparing pixel prediction with JEPA latent prediction">
+      <text x="10" y="16" font-family="Helvetica" font-size="11" font-weight="650" fill="#c0392b">THE TRAP &mdash; predict the picture</text>
+      <rect x="10" y="26" width="80" height="56" rx="4" fill="#fff" stroke="#dcdcd2"/>
+      <rect x="18" y="66" width="64" height="7" fill="#e6e6dc"/><rect x="34" y="50" width="13" height="13" rx="3" fill="#2a78d6"/>
+      <text x="50" y="96" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">now</text>
+      <line x1="96" y1="54" x2="140" y2="54" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="146" y="26" width="80" height="56" rx="4" fill="#fdf2e9" stroke="#eb6834"/>
+      <text x="186" y="50" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#a86a00">draw all</text>
+      <text x="186" y="63" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#a86a00">150,528</text>
+      <text x="186" y="76" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#a86a00">numbers</text>
+      <text x="240" y="46" font-family="Helvetica" font-size="10" fill="#c0392b">&larr; almost all effort spent on</text>
+      <text x="240" y="60" font-family="Helvetica" font-size="10" fill="#c0392b">&nbsp;&nbsp; clouds and bricks</text>
+      <text x="240" y="74" font-family="Helvetica" font-size="10" fill="#c0392b">&nbsp;&nbsp; that change no decision</text>
+
+      <line x1="10" y1="108" x2="690" y2="108" stroke="#dcdcd2"/>
+
+      <text x="10" y="132" font-family="Helvetica" font-size="11" font-weight="650" fill="#2a78d6">JEPA &mdash; predict the summary</text>
+      <rect x="10" y="142" width="70" height="50" rx="4" fill="#fff" stroke="#dcdcd2"/>
+      <rect x="17" y="178" width="56" height="6" fill="#e6e6dc"/><rect x="30" y="164" width="12" height="12" rx="3" fill="#2a78d6"/>
+      <text x="45" y="206" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">now</text>
+      <line x1="86" y1="167" x2="112" y2="167" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="118" y="150" width="54" height="34" rx="4" fill="#eef5fd" stroke="#2a78d6"/>
+      <text x="145" y="164" text-anchor="middle" font-family="Helvetica" font-size="8.5" fill="#2a78d6">squash</text>
+      <text x="145" y="177" text-anchor="middle" font-family="Helvetica" font-size="8.5" fill="#2a78d6">to 192</text>
+      <line x1="178" y1="167" x2="206" y2="167" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="212" y="150" width="66" height="34" rx="4" fill="#f0eef8" stroke="#4a3aa7"/>
+      <text x="245" y="171" text-anchor="middle" font-family="Helvetica" font-size="9" font-weight="650" fill="#4a3aa7">predict</text>
+      <line x1="284" y1="167" x2="312" y2="167" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="318" y="150" width="66" height="34" rx="4" fill="#f0eef8" stroke="#4a3aa7" stroke-dasharray="3 2"/>
+      <text x="351" y="164" text-anchor="middle" font-family="Helvetica" font-size="8.5" fill="#4a3aa7">guessed</text>
+      <text x="351" y="177" text-anchor="middle" font-family="Helvetica" font-size="8.5" fill="#4a3aa7">192</text>
+      <text x="400" y="160" font-family="Helvetica" font-size="10" fill="#1e7a46">compare against the REAL</text>
+      <text x="400" y="174" font-family="Helvetica" font-size="10" fill="#1e7a46">future summary &mdash; 192 vs 192,</text>
+      <text x="400" y="188" font-family="Helvetica" font-size="10" fill="#1e7a46">no drawing ever needed</text>
+      <text x="10" y="232" font-family="Helvetica" font-size="10" fill="#6f6f64">784&times; fewer numbers to get right, and none of them are clouds.</text>
+    </svg>
+    <figcaption><b>Figure 2.</b> Pixel prediction versus JEPA. 150,528 numbers is
+    224&times;224&times;3 (width &times; height &times; red-green-blue). The summary is 192
+    numbers. The ratio is 784 to 1.</figcaption>
+  </figure>
+
+  <div class="box warnb">
+    <h4>But this creates a brand-new way to cheat</h4>
+    <p style="margin:0">If the model gets to invent the summaries <i>and</i> is scored on
+    predicting them, there is a perfect trick: make every summary identical. Then
+    prediction is trivially perfect and the score is flawless. The model has learned
+    nothing and looks like a genius. This is called <b>collapse</b>, and Section 8 is
+    about the arms race against it.</p>
+  </div>
+</section>
+<section class="part" id="data">
+  <div class="kicker">Section 6</div>
+  <h2>The data: 8,000 recorded lives</h2>
+  <div class="rule"></div>
+  <p class="lede">You cannot learn how a world works from a handful of examples. We
+  generated 4.88 million.</p>
+
+  <table>
+    <tr><th>What</th><th class="num">Amount</th><th>Meaning in plain words</th></tr>
+    <tr><td>Episodes</td><td class="num">8,000</td><td>complete playthroughs, start to death or timeout</td></tr>
+    <tr><td>Observations</td><td class="num">4,880,000</td><td>individual moments recorded</td></tr>
+    <tr><td>Average length</td><td class="num">669</td><td>moments per episode (measured, not estimated)</td></tr>
+    <tr><td>Storage</td><td class="num">27 GB</td><td>compressed; 1,065 GB if stored raw</td></tr>
+    <tr><td>Frame size</td><td class="num">224&times;224</td><td>pixels, colour</td></tr>
+  </table>
+
+  <h3>Two kinds of player, on purpose</h3>
+  <p>Half the episodes came from a <b>random</b> player &mdash; buttons mashed at random.
+  That sounds useless but is essential: a random player dies in every possible way, so
+  the model sees plenty of hazards. Its weakness is that it rarely gets far, topping out
+  around pixel 1,416 of 3,161.</p>
+
+  <p>The other half came from a <b>PPO</b> (Proximal Policy Optimisation) agent &mdash; a
+  reinforcement-learning bot trained to make progress, reaching pixel 2,424 on average.
+  It covers the later parts of the level the random player never sees.</p>
+
+  <div class="box tip">
+    <h4>The PPO agent is not part of the world model</h4>
+    <p style="margin:0">It is a camera operator, not an actor. It exists purely to record
+    footage of the level's far half. The world model never sees its rewards, its goals or
+    its decisions &mdash; only the resulting screens and buttons.</p>
+  </div>
+
+  <h3>The off-by-one that would have ruined everything</h3>
+  <p>In the recording, <code>actions[i]</code> is the button press that <i>caused</i>
+  <code>frames[i]</code>. If you line these up wrong by a single position, you are asking
+  the model to predict the <i>past</i> from the future. Nothing crashes. The loss still
+  goes down, because consecutive button presses are similar. You simply get a subtly
+  wrong model and no warning at all.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 150" role="img" aria-label="Timing diagram of frames and the actions that caused them">
+      <text x="6" y="16" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">frames (what the screen showed)</text>
+      <g font-family="Helvetica" font-size="10" fill="#44443c">
+      <rect x="60" y="26" width="66" height="34" rx="4" fill="#fff" stroke="#dcdcd2"/><text x="93" y="47" text-anchor="middle">frame 0</text>
+      <rect x="146" y="26" width="66" height="34" rx="4" fill="#fff" stroke="#dcdcd2"/><text x="179" y="47" text-anchor="middle">frame 1</text>
+      <rect x="232" y="26" width="66" height="34" rx="4" fill="#fff" stroke="#dcdcd2"/><text x="265" y="47" text-anchor="middle">frame 2</text>
+      <rect x="318" y="26" width="66" height="34" rx="4" fill="#fff" stroke="#dcdcd2"/><text x="351" y="47" text-anchor="middle">frame 3</text>
+      </g>
+      <text x="6" y="108" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">actions (buttons that caused it)</text>
+      <g font-family="Helvetica" font-size="10" fill="#2a78d6">
+      <rect x="146" y="88" width="66" height="30" rx="4" fill="#eef5fd" stroke="#2a78d6"/><text x="179" y="107" text-anchor="middle">act 1</text>
+      <rect x="232" y="88" width="66" height="30" rx="4" fill="#eef5fd" stroke="#2a78d6"/><text x="265" y="107" text-anchor="middle">act 2</text>
+      <rect x="318" y="88" width="66" height="30" rx="4" fill="#eef5fd" stroke="#2a78d6"/><text x="351" y="107" text-anchor="middle">act 3</text>
+      </g>
+      <path d="M179,86 L179,64" stroke="#1e7a46" stroke-width="1.6" marker-end="url(#ar)"/>
+      <path d="M265,86 L265,64" stroke="#1e7a46" stroke-width="1.6" marker-end="url(#ar)"/>
+      <path d="M351,86 L351,64" stroke="#1e7a46" stroke-width="1.6" marker-end="url(#ar)"/>
+      <text x="404" y="46" font-family="Helvetica" font-size="10.5" fill="#1e7a46">RIGHT: act 1 caused frame 1</text>
+      <text x="404" y="62" font-family="Helvetica" font-size="10.5" fill="#c0392b">WRONG: act 1 caused frame 0</text>
+      <text x="404" y="78" font-family="Helvetica" font-size="10" fill="#6f6f64">&mdash; the loss still falls, so you</text>
+      <text x="404" y="92" font-family="Helvetica" font-size="10" fill="#6f6f64">&nbsp;&nbsp; never find out you are wrong</text>
+      <text x="6" y="140" font-family="Helvetica" font-size="10" fill="#6f6f64">Frame 0 has no arrow: nothing before it caused it. That gap is why the alignment is easy to get wrong.</text>
+    </svg>
+    <figcaption><b>Figure 3.</b> Action alignment. We wrote an automated test that builds
+    fake data where the correct alignment is solvable and the shifted one is not; the
+    correct version reaches an error below 0.05 while the shifted version cannot get
+    within 5&times; of it.</figcaption>
+  </figure>
+
+  <h3>Ground truth we can trust</h3>
+  <p>The character's position lives at specific addresses in the console's memory. Guessing
+  the wrong address does not crash anything &mdash; it silently corrupts every measurement
+  downstream. So the addresses are treated as <i>candidates</i> and verified empirically:
+  the chosen pair reproduces the emulator's own reported position with R&sup2; =
+  <b>1.0000000000</b> over 300 frames. The data collector refuses to run until this check
+  has passed.</p>
+</section>
+
+<section class="part" id="arch">
+  <div class="kicker">Section 7</div>
+  <h2>Inside the machine</h2>
+  <div class="rule"></div>
+  <p class="lede">Three parts: something that looks, something that listens to buttons,
+  and something that imagines.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 330" role="img" aria-label="Architecture diagram of encoder, action encoder and predictor">
+      <text x="8" y="16" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">PAST &mdash; 3 moments the model is allowed to see</text>
+      <g>
+        <rect x="8" y="26" width="58" height="42" rx="4" fill="#fff" stroke="#dcdcd2"/>
+        <rect x="14" y="56" width="46" height="6" fill="#e6e6dc"/><rect x="22" y="44" width="11" height="11" rx="2" fill="#2a78d6"/>
+        <rect x="74" y="26" width="58" height="42" rx="4" fill="#fff" stroke="#dcdcd2"/>
+        <rect x="80" y="56" width="46" height="6" fill="#e6e6dc"/><rect x="93" y="44" width="11" height="11" rx="2" fill="#2a78d6"/>
+        <rect x="140" y="26" width="58" height="42" rx="4" fill="#fff" stroke="#dcdcd2"/>
+        <rect x="146" y="56" width="46" height="6" fill="#e6e6dc"/><rect x="163" y="41" width="11" height="11" rx="2" fill="#2a78d6"/>
+      </g>
+      <line x1="103" y1="74" x2="103" y2="96" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="18" y="102" width="170" height="44" rx="6" fill="#eef5fd" stroke="#2a78d6" stroke-width="1.4"/>
+      <text x="103" y="122" text-anchor="middle" font-family="Helvetica" font-size="11.5" font-weight="650" fill="#2a78d6">THE EYE (encoder)</text>
+      <text x="103" y="137" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#44443c">Vision Transformer &middot; 5.65M numbers</text>
+      <line x1="103" y1="150" x2="103" y2="172" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <g>
+        <rect x="34" y="178" width="42" height="18" rx="3" fill="#dbe8f9" stroke="#2a78d6"/>
+        <rect x="82" y="178" width="42" height="18" rx="3" fill="#dbe8f9" stroke="#2a78d6"/>
+        <rect x="130" y="178" width="42" height="18" rx="3" fill="#dbe8f9" stroke="#2a78d6"/>
+      </g>
+      <text x="103" y="212" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#6f6f64">three summaries, 192 numbers each</text>
+
+      <rect x="8" y="238" width="190" height="56" rx="6" fill="#f4f4ee" stroke="#dcdcd2"/>
+      <text x="103" y="258" text-anchor="middle" font-family="Helvetica" font-size="11.5" font-weight="650" fill="#44443c">THE EAR (action encoder)</text>
+      <text x="103" y="273" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#6f6f64">6 buttons &rarr; a code</text>
+      <text x="103" y="287" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#6f6f64">0.04M numbers</text>
+
+      <path d="M202,190 L250,190" stroke="#6f6f64" stroke-width="1.6" marker-end="url(#ar)"/>
+      <path d="M202,266 L230,266 Q250,266 250,220" stroke="#6f6f64" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+
+      <rect x="258" y="150" width="180" height="90" rx="7" fill="#f0eef8" stroke="#4a3aa7" stroke-width="1.6"/>
+      <text x="348" y="180" text-anchor="middle" font-family="Helvetica" font-size="12.5" font-weight="650" fill="#4a3aa7">THE IMAGINATION</text>
+      <text x="348" y="196" text-anchor="middle" font-family="Helvetica" font-size="11" fill="#4a3aa7">(predictor)</text>
+      <text x="348" y="214" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#44443c">6 layers &middot; AdaLN-Zero</text>
+      <text x="348" y="228" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#44443c">4.04M numbers</text>
+
+      <line x1="444" y1="195" x2="486" y2="195" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="494" y="150" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">FUTURE &mdash; 5 guessed summaries</text>
+      <g>
+        <rect x="494" y="162" width="40" height="18" rx="3" fill="#f0eef8" stroke="#4a3aa7" stroke-dasharray="3 2"/>
+        <rect x="540" y="162" width="40" height="18" rx="3" fill="#f0eef8" stroke="#4a3aa7" stroke-dasharray="3 2"/>
+        <rect x="586" y="162" width="40" height="18" rx="3" fill="#f0eef8" stroke="#4a3aa7" stroke-dasharray="3 2"/>
+        <rect x="632" y="162" width="40" height="18" rx="3" fill="#f0eef8" stroke="#4a3aa7" stroke-dasharray="3 2"/>
+        <rect x="494" y="188" width="40" height="18" rx="3" fill="#f0eef8" stroke="#4a3aa7" stroke-dasharray="3 2"/>
+      </g>
+      <text x="494" y="228" font-family="Helvetica" font-size="10" fill="#1e7a46">compared against the real</text>
+      <text x="494" y="242" font-family="Helvetica" font-size="10" fill="#1e7a46">future summaries &mdash; that</text>
+      <text x="494" y="256" font-family="Helvetica" font-size="10" fill="#1e7a46">difference is the whole lesson</text>
+      <text x="8" y="318" font-family="Helvetica" font-size="10" fill="#6f6f64">Total trainable: 9.8 million numbers. A large modern language model has 100,000&times; more.</text>
+    </svg>
+    <figcaption><b>Figure 4.</b> The architecture. Three real moments in, five imagined
+    moments out, with button presses steering the imagination.</figcaption>
+  </figure>
+
+  <h3>AdaLN-Zero: how buttons get a say</h3>
+  <p>The buttons do not get glued onto the input. Instead they <i>modulate</i> the
+  imagination at every layer &mdash; turning dials rather than adding ingredients. The
+  "Zero" part means every dial starts at zero, so at the very first training step the
+  buttons have <b>no effect at all</b>, and the model must learn to turn them up.</p>
+
+  <div class="box warnb">
+    <h4>Remember this design choice</h4>
+    <p style="margin:0">It was chosen specifically to stop the model ignoring the buttons.
+    Section 13 is about discovering that it failed to do so, and that every test we had
+    for it was checking the wrong thing.</p>
+  </div>
+</section>
+<section class="part" id="collapse">
+  <div class="kicker">Section 8</div>
+  <h2>The cheating problem</h2>
+  <div class="rule"></div>
+  <p class="lede">The model's best possible score is achieved by learning nothing.
+  Everything in this section exists to remove that option.</p>
+
+  <p>Recall the trap: the model invents the summaries <i>and</i> is graded on predicting
+  them. So the winning strategy is to make every summary the same. Prediction error goes
+  to zero. The model is now a very expensive way of outputting one fixed list of 192
+  numbers.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 190" role="img" aria-label="Healthy spread-out latent cloud versus collapsed latent">
+      <rect x="14" y="26" width="200" height="132" rx="6" fill="#f4f4ee" stroke="#dcdcd2"/>
+      <text x="114" y="18" text-anchor="middle" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#1e7a46">HEALTHY &mdash; eff_dim ~30</text>
+      <g fill="#2a78d6" opacity=".8">
+        <circle cx="60" cy="60" r="4"/><circle cx="95" cy="48" r="4"/><circle cx="140" cy="66" r="4"/>
+        <circle cx="72" cy="98" r="4"/><circle cx="118" cy="110" r="4"/><circle cx="168" cy="88" r="4"/>
+        <circle cx="45" cy="124" r="4"/><circle cx="152" cy="132" r="4"/><circle cx="104" cy="80" r="4"/>
+        <circle cx="182" cy="44" r="4"/><circle cx="86" cy="140" r="4"/><circle cx="136" cy="36" r="4"/>
+      </g>
+      <text x="114" y="176" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#6f6f64">different screens land in different places</text>
+
+      <rect x="250" y="26" width="200" height="132" rx="6" fill="#f4f4ee" stroke="#dcdcd2"/>
+      <text x="350" y="18" text-anchor="middle" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#c0392b">COLLAPSED &mdash; eff_dim ~2</text>
+      <g fill="#e34948" opacity=".85">
+        <circle cx="348" cy="90" r="4"/><circle cx="352" cy="93" r="4"/><circle cx="350" cy="87" r="4"/>
+        <circle cx="354" cy="90" r="4"/><circle cx="346" cy="92" r="4"/><circle cx="351" cy="95" r="4"/>
+        <circle cx="349" cy="84" r="4"/><circle cx="353" cy="86" r="4"/><circle cx="347" cy="96" r="4"/>
+      </g>
+      <text x="350" y="176" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#6f6f64">every screen lands in the same place</text>
+
+      <text x="474" y="56" font-family="Helvetica" font-size="10.5" fill="#44443c">Prediction error on the right:</text>
+      <text x="474" y="72" font-family="Helvetica" font-size="13" font-weight="650" fill="#c0392b">essentially zero.</text>
+      <text x="474" y="94" font-family="Helvetica" font-size="10.5" fill="#44443c">Usefulness on the right:</text>
+      <text x="474" y="110" font-family="Helvetica" font-size="13" font-weight="650" fill="#c0392b">also zero.</text>
+      <text x="474" y="136" font-family="Helvetica" font-size="10" fill="#6f6f64">A loss curve cannot tell</text>
+      <text x="474" y="150" font-family="Helvetica" font-size="10" fill="#6f6f64">these two apart.</text>
+    </svg>
+    <figcaption><b>Figure 5.</b> Collapse, drawn in 2 dimensions instead of 192. We
+    measured a real collapsed run at effective dimension <b>2.0</b> while its prediction
+    score read a magnificent-looking 0.97.</figcaption>
+  </figure>
+
+  <h3>Defence one: SIGReg</h3>
+  <p><b>SIGReg</b> (Sketched Isotropic Gaussian Regularisation) adds a penalty that grows
+  whenever the cloud of summaries stops being a nice round spread. It pushes back against
+  clumping. Its strength is set by a number called lambda (&lambda;).</p>
+
+  <p>We measured what different strengths do. Weak settings lose the fight outright:</p>
+  <table>
+    <tr><th>&lambda; (SIGReg strength)</th><th class="num">Effective dimension</th><th>Verdict</th></tr>
+    <tr><td>0.1</td><td class="num">1.08</td><td class="lose">collapsed</td></tr>
+    <tr><td>1.0</td><td class="num">1.89</td><td class="lose">collapsed</td></tr>
+    <tr><td><b>10.0</b></td><td class="num">10.3 &rarr; 21.1</td><td class="win">holds, and rises</td></tr>
+  </table>
+
+  <h3>Defence two: the stop-gradient</h3>
+  <p>SIGReg alone was not enough. The arithmetic explains why: collapsing is worth about
+  <b>0.80</b> of prediction loss to the model, while the regularisation penalty costs it
+  far less. Cheating simply pays better.</p>
+
+  <p>So we added a <b>stop-gradient</b>: the model may look at the true future summary but
+  may not adjust itself to make that summary easier to predict. It has to come to the
+  future, not drag the future toward it.</p>
+
+  <div class="box keyb">
+    <h4>This works, and it has a hidden cost</h4>
+    <p style="margin:0">The stop-gradient means the future frames contribute <b>no
+    learning signal at all</b> to the eye. Whatever the model represents about the thing
+    it is predicting is shaped only indirectly. In Section 10 this turns out to be the
+    single most important fact in the entire experiment.</p>
+  </div>
+</section>
+
+<section class="part" id="probe">
+  <div class="kicker">Section 9</div>
+  <h2>Probes: how you read a model's mind</h2>
+  <div class="rule"></div>
+  <p class="lede">Freeze the model. Ask a tiny student to read one fact out of its
+  summaries. How well the student does tells you whether the fact was in there.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 175" role="img" aria-label="Diagram of a frozen encoder feeding a small probe that predicts height">
+      <rect x="10" y="46" width="118" height="62" rx="5" fill="#fff" stroke="#dcdcd2"/>
+      <rect x="20" y="92" width="98" height="8" fill="#e6e6dc"/><rect x="46" y="66" width="15" height="15" rx="3" fill="#2a78d6"/>
+      <text x="69" y="126" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#6f6f64">a held-out screen</text>
+      <line x1="134" y1="77" x2="168" y2="77" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="176" y="44" width="132" height="66" rx="6" fill="#ecece4" stroke="#9a9a8c" stroke-width="1.4"/>
+      <text x="242" y="70" text-anchor="middle" font-family="Helvetica" font-size="11.5" font-weight="650" fill="#44443c">THE EYE</text>
+      <text x="242" y="87" text-anchor="middle" font-family="Helvetica" font-size="12" fill="#44443c">&#10052; FROZEN</text>
+      <text x="242" y="101" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">cannot learn anything here</text>
+      <line x1="314" y1="77" x2="348" y2="77" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="356" y="60" width="70" height="34" rx="4" fill="#dbe8f9" stroke="#2a78d6"/>
+      <text x="391" y="81" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#2a78d6">192 numbers</text>
+      <line x1="432" y1="77" x2="466" y2="77" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="474" y="50" width="104" height="54" rx="5" fill="#f0eef8" stroke="#4a3aa7" stroke-width="1.3"/>
+      <text x="526" y="72" text-anchor="middle" font-family="Helvetica" font-size="11" font-weight="650" fill="#4a3aa7">THE PROBE</text>
+      <text x="526" y="88" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#44443c">small; learns</text>
+      <line x1="584" y1="77" x2="614" y2="77" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="622" y="72" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">"height</text>
+      <text x="622" y="86" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">= 346"</text>
+      <text x="10" y="152" font-family="Helvetica" font-size="10" fill="#6f6f64">Score it against the console's true value. Good score &rarr; the information was present. Bad score &rarr; it was thrown away.</text>
+      <text x="10" y="166" font-family="Helvetica" font-size="10" fill="#6f6f64">Because the eye is frozen, the probe can only find what is already there. It cannot teach the eye anything.</text>
+    </svg>
+    <figcaption><b>Figure 6.</b> Probing. The snowflake means the big model's numbers are
+    locked. Only the small probe learns.</figcaption>
+  </figure>
+
+  <h3>Reading R&sup2; without a statistics degree</h3>
+  <table>
+    <tr><th>R&sup2;</th><th>What it means</th><th>In this project</th></tr>
+    <tr><td class="num">1.00</td><td>perfect &mdash; every guess exactly right</td><td>never happens</td></tr>
+    <tr><td class="num">0.96</td><td>excellent</td><td>our best height score</td></tr>
+    <tr><td class="num">0.59</td><td>solid &mdash; most of the pattern captured</td><td>our best score with zero hints</td></tr>
+    <tr><td class="num">0.19</td><td>weak &mdash; a faint trace</td><td>the previous project's score</td></tr>
+    <tr><td class="num">0.00</td><td>useless &mdash; same as always guessing the average</td><td>&mdash;</td></tr>
+    <tr><td class="num">&minus;0.46</td><td>worse than useless</td><td>the broken model</td></tr>
+  </table>
+
+  <h3>The split protocol, and why it decides whether numbers mean anything</h3>
+  <p>Consecutive frames of a video game are nearly identical. If you split them randomly,
+  a probe can memorise frame 400 and then "predict" frame 401 perfectly &mdash; the score
+  is meaningless. So we split by <b>complete playthrough</b>: 60 entire episodes are set
+  aside and never used for training the probe. Same seed every time, so all four
+  experiments are graded on the identical 60 episodes, 24,313 moments.</p>
+</section>
+<section class="part" id="four">
+  <div class="kicker">Section 10</div>
+  <h2>The four experiments</h2>
+  <div class="rule"></div>
+  <p class="lede">Same data. Same seed. Same 41,160 steps. One thing changed at a time.</p>
+
+  <p>Every run used identical settings except the one variable being tested, so any
+  difference in the results is attributable to that variable and nothing else.</p>
+
+  <table>
+    <tr><th>Run</th><th>Target branch</th><th>Extra hints?</th><th>The question it answers</th></tr>
+    <tr><td><b style="color:#1baf7a">pure + stop-grad</b></td><td>stop-gradient</td><td>none</td>
+      <td>Does a plain self-supervised JEPA discover the character's height?</td></tr>
+    <tr><td><b style="color:#eb6834">aux</b></td><td>stop-gradient</td><td>told height, camera, danger</td>
+      <td>If we simply tell it, how good does it get?</td></tr>
+    <tr><td><b style="color:#2a78d6">pure + EMA</b></td><td>momentum teacher</td><td>none</td>
+      <td>Is the stop-gradient the thing that was breaking it?</td></tr>
+    <tr><td><b style="color:#4a3aa7">pure + EMA + inverse dynamics</b></td><td>momentum teacher</td><td>none</td>
+      <td>Can we force it to pay attention to the buttons?</td></tr>
+  </table>
+
+  <h3>The key idea: stop-gradient versus momentum teacher</h3>
+  <p>Both stop the model from cheating, but they pay for it differently.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 260" role="img" aria-label="Comparison of stop-gradient and EMA momentum teacher">
+      <text x="14" y="16" font-family="Helvetica" font-size="11" font-weight="650" fill="#1baf7a">STOP-GRADIENT &mdash; the target is frozen solid</text>
+      <rect x="14" y="26" width="120" height="46" rx="5" fill="#eef5fd" stroke="#2a78d6"/>
+      <text x="74" y="46" text-anchor="middle" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#2a78d6">THE EYE</text>
+      <text x="74" y="61" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#44443c">(learning)</text>
+      <line x1="140" y1="49" x2="186" y2="49" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="194" y="26" width="130" height="46" rx="5" fill="#ecece4" stroke="#9a9a8c"/>
+      <text x="259" y="46" text-anchor="middle" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">the future summary</text>
+      <text x="259" y="61" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#44443c">&#10052; no learning flows back</text>
+      <path d="M259,78 L259,92 L74,92 L74,78" stroke="#c0392b" stroke-width="1.5" fill="none" stroke-dasharray="4 3"/>
+      <text x="167" y="106" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#c0392b">this path is CUT &mdash; the eye never learns</text>
+      <text x="167" y="119" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#c0392b">anything from the frames it predicts</text>
+      <text x="344" y="46" font-family="Helvetica" font-size="10.5" fill="#44443c">Result: height score</text>
+      <text x="344" y="62" font-family="Helvetica" font-size="16" font-weight="650" fill="#c0392b">&minus;0.46</text>
+      <text x="344" y="80" font-family="Helvetica" font-size="10" fill="#6f6f64">worse than guessing</text>
+
+      <line x1="14" y1="136" x2="686" y2="136" stroke="#dcdcd2"/>
+
+      <text x="14" y="160" font-family="Helvetica" font-size="11" font-weight="650" fill="#2a78d6">MOMENTUM TEACHER (EMA) &mdash; the target is a slow copy</text>
+      <rect x="14" y="170" width="120" height="46" rx="5" fill="#eef5fd" stroke="#2a78d6"/>
+      <text x="74" y="190" text-anchor="middle" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#2a78d6">THE STUDENT</text>
+      <text x="74" y="205" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#44443c">(learning fast)</text>
+      <line x1="140" y1="193" x2="186" y2="193" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="194" y="170" width="130" height="46" rx="5" fill="#dbe8f9" stroke="#2a78d6" stroke-dasharray="4 2"/>
+      <text x="259" y="190" text-anchor="middle" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#2a78d6">THE TEACHER</text>
+      <text x="259" y="205" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#44443c">a slow average of the student</text>
+      <path d="M74,222 L74,236 L259,236 L259,222" stroke="#1e7a46" stroke-width="1.5" fill="none"/>
+      <text x="167" y="250" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#1e7a46">the teacher keeps improving &mdash; 0.1% of the student copied each step</text>
+      <text x="344" y="190" font-family="Helvetica" font-size="10.5" fill="#44443c">Result: height score</text>
+      <text x="344" y="206" font-family="Helvetica" font-size="16" font-weight="650" fill="#1e7a46">+0.59</text>
+      <text x="344" y="224" font-family="Helvetica" font-size="10" fill="#6f6f64">3.1&times; the previous project</text>
+    </svg>
+    <figcaption><b>Figure 7.</b> The single change that mattered most. A momentum teacher
+    still cannot be chased (it moves too slowly to game in one step) but it keeps
+    developing, so what the model represents about the future keeps improving too.</figcaption>
+  </figure>
+
+  <div class="box tip">
+    <h4>Why "momentum"?</h4>
+    <p style="margin:0">Each training step, the teacher copies <b>0.1%</b> of the student
+    and keeps 99.9% of itself. Over a thousand steps it drifts to roughly where the
+    student was. Too fast and it becomes the student, and the cheating returns. Too slow
+    and it stays a frozen random network. We used 0.999 and checked the effective
+    dimension never collapsed &mdash; it reached <b>35.4</b>, the highest of any run.</p>
+  </div>
+</section>
+
+<section class="part" id="results">
+  <div class="kicker">Section 11</div>
+  <h2>Results</h2>
+  <div class="rule"></div>
+  <p class="lede">All four graded on the same 60 held-out playthroughs, 24,313 moments,
+  after the full 41,160 steps.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 300" role="img" aria-label="Bar chart of final height probe scores for four models and the baseline">
+      <text x="16" y="18" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">Height (y) probe R&sup2; &mdash; higher is better</text>
+      <line x1="120" y1="30" x2="120" y2="262" stroke="#ecece4"/>
+      <line x1="293" y1="30" x2="293" y2="262" stroke="#c8c8bc" stroke-width="1.2"/>
+      <line x1="467" y1="30" x2="467" y2="262" stroke="#ecece4"/>
+      <line x1="640" y1="30" x2="640" y2="262" stroke="#ecece4"/>
+      <text x="120" y="278" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">&minus;0.5</text>
+      <text x="293" y="278" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">0.0</text>
+      <text x="467" y="278" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">0.5</text>
+      <text x="640" y="278" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">1.0</text>
+      <text x="120" y="44" font-family="Helvetica" font-size="10" fill="#44443c">aux &mdash; hints given</text>
+      <rect x="293" y="50" width="334" height="16" rx="4" fill="#eb6834"/>
+      <text x="635" y="63" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">0.962</text>
+      <text x="120" y="90" font-family="Helvetica" font-size="10" fill="#44443c">pure + EMA + inverse dynamics</text>
+      <rect x="293" y="96" width="226" height="16" rx="4" fill="#4a3aa7"/>
+      <text x="527" y="109" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">0.651</text>
+      <text x="120" y="136" font-family="Helvetica" font-size="10" font-weight="650" fill="#14140f">pure + EMA &mdash; no hints at all</text>
+      <rect x="293" y="142" width="205" height="16" rx="4" fill="#2a78d6"/>
+      <text x="506" y="155" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">0.590</text>
+      <text x="120" y="182" font-family="Helvetica" font-size="10" fill="#44443c">LeMario &mdash; previous work</text>
+      <rect x="293" y="188" width="65" height="16" rx="4" fill="#9a9a8c"/>
+      <text x="366" y="201" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">0.188</text>
+      <text x="120" y="228" font-family="Helvetica" font-size="10" fill="#44443c">pure + stop-gradient</text>
+      <rect x="133" y="234" width="160" height="16" rx="4" fill="#1baf7a"/>
+      <text x="127" y="247" text-anchor="end" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">&minus;0.461</text>
+      <text x="16" y="296" font-family="Helvetica" font-size="9" fill="#6f6f64">Grey = the score this project set out to beat. The bar left of the 0.0 line is worse than always guessing the average.</text>
+    </svg>
+    <figcaption><b>Figure 8.</b> The headline. Only the orange bar was given hints; the
+    blue and violet bars learned everything from watching.</figcaption>
+  </figure>
+
+  <h3>How each run developed over time</h3>
+  <figure>
+    <svg viewBox="0 0 700 300" role="img" aria-label="Line chart of height probe score over training progress for four runs">
+      <defs><clipPath id="plotclip"><rect x="60" y="36" width="590" height="206"/></clipPath></defs>
+      <text x="16" y="18" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">Height probe R&sup2;, measured every 10% of training</text>
+      <line x1="60" y1="40" x2="60" y2="240" stroke="#c8c8bc"/>
+      <line x1="60" y1="40" x2="650" y2="40" stroke="#ecece4"/>
+      <line x1="60" y1="107" x2="650" y2="107" stroke="#ecece4"/>
+      <line x1="60" y1="173" x2="650" y2="173" stroke="#c8c8bc" stroke-dasharray="3 3"/>
+      <line x1="60" y1="240" x2="650" y2="240" stroke="#c8c8bc"/>
+      <text x="54" y="44" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">1.0</text>
+      <text x="54" y="111" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">0.5</text>
+      <text x="54" y="177" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">0.0</text>
+      <text x="54" y="244" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">&minus;0.5</text>
+      <text x="60" y="262" font-family="Helvetica" font-size="9" fill="#6f6f64">10%</text>
+      <text x="355" y="262" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">training progress &rarr;</text>
+      <text x="650" y="262" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">100%</text>
+      <g clip-path="url(#plotclip)">
+        <polyline fill="none" stroke="#1baf7a" stroke-width="2.2"
+          points="60,326 126,300 191,227 257,386 322,971 388,1090 453,649 519,433 584,579 650,523"/>
+        <polyline fill="none" stroke="#eb6834" stroke-width="2.2"
+          points="60,108 126,107 191,75 257,60 322,55 388,50 453,48 519,47 584,47 650,47"/>
+        <polyline fill="none" stroke="#4a3aa7" stroke-width="2.2"
+          points="60,174 126,176 191,109 257,95 322,99 388,88 453,76 519,74 584,74 650,74"/>
+        <polyline fill="none" stroke="#2a78d6" stroke-width="2.2"
+          points="60,144 126,114 191,112 257,107 322,111 388,100 453,102 519,108 584,105 650,108"/>
+      </g>
+      <text x="656" y="50" font-family="Helvetica" font-size="9.5" font-weight="650" fill="#eb6834">aux</text>
+      <text x="656" y="77" font-family="Helvetica" font-size="9.5" font-weight="650" fill="#4a3aa7">+inv</text>
+      <text x="656" y="111" font-family="Helvetica" font-size="9.5" font-weight="650" fill="#2a78d6">EMA</text>
+      <text x="196" y="232" font-family="Helvetica" font-size="9.5" font-weight="650" fill="#1baf7a">pure + stop-gradient</text>
+      <text x="196" y="245" font-family="Helvetica" font-size="9" fill="#1baf7a">dives off the chart &mdash; reaches &minus;6.9</text>
+      <text x="16" y="284" font-family="Helvetica" font-size="9" fill="#6f6f64">The green line leaves the plot area almost immediately and never returns. It is shown clipped rather than rescaled, because rescaling to</text>
+      <text x="16" y="296" font-family="Helvetica" font-size="9" fill="#6f6f64">fit it would flatten the three lines that matter into a single band.</text>
+    </svg>
+    <figcaption><b>Figure 9.</b> Measured at ten checkpoints per run. The orange line
+    climbs steadily because it is being told the answer. The blue and violet lines climb
+    because they are working it out.</figcaption>
+  </figure>
+
+  <div class="box keyb">
+    <h4>The finding the previous work could not settle</h4>
+    <p style="margin:0">The obvious excuse for a low self-supervised score is "it just
+    needs longer." We tested that directly. At 4% of training the plain model scored
+    &minus;0.383. After <b>ten times</b> more training it scored <b>&minus;0.461</b>
+    &mdash; it got <i>worse</i>. More training is not the answer; the stop-gradient was
+    the problem.</p>
+  </div>
+</section>
+<section class="part" id="gates">
+  <div class="kicker">Section 12</div>
+  <h2>Gates: automatic alarms</h2>
+  <div class="rule"></div>
+  <p class="lede">The point of the project: catch a broken model early, from the inside,
+  without waiting for it to fail at a real task.</p>
+
+  <p>The previous project found its problem the expensive way &mdash; built a planner,
+  the planner failed, then months later a hand-run probe revealed why. A <b>gate</b>
+  inverts that: run the probes automatically at every checkpoint, and if the model has
+  thrown away something essential, stop the run.</p>
+
+  <p>Our runs save a checkpoint and run the probes every 10%. Four health questions are
+  asked each time, each matching a known way this can fail:</p>
+
+  <table>
+    <tr><th>Check</th><th>Question</th><th>The failure it catches</th></tr>
+    <tr><td><b>learning</b></td><td>Is prediction error still falling?</td><td>training has stalled</td></tr>
+    <tr><td><b>not collapsing</b></td><td>Is effective dimension holding?</td><td>the cheat from Section 8</td></tr>
+    <tr><td><b>regularised</b></td><td>Is SIGReg in range?</td><td>the cloud is deforming</td></tr>
+    <tr><td><b>representing</b></td><td>Is the height probe rising?</td><td>the state is being discarded</td></tr>
+  </table>
+
+  <p>Only the last one cannot be faked by a confident, collapsed model &mdash; which is
+  why it is the one wired to actually stop the run.</p>
+
+  <div class="box tip">
+    <h4>It fired, on real data, exactly as designed</h4>
+    <p style="margin:0">At 40% of the plain run, the height score had gone
+    &minus;0.40 &rarr; &minus;1.60 while prediction error read a perfectly healthy 0.2550
+    and the 5-step prediction score read <b>+0.745</b>. On the loss curve alone, nothing
+    was wrong. The gate would have killed that run about an hour in. We let it continue
+    deliberately, to see the whole trajectory &mdash; and it went on to get five times
+    worse. The abort rule was right.</p>
+  </div>
+
+  <p>The rule needs <i>two</i> consecutive non-improving readings below the floor, never
+  one. A single low reading is not evidence: the healthy model measured 0.12 at 10% simply
+  because it was young. Killing on one number would have thrown away a run that was on
+  its way up.</p>
+</section>
+
+<section class="part" id="discovery">
+  <div class="kicker">Section 13</div>
+  <h2>The discovery: the models were ignoring the buttons</h2>
+  <div class="rule"></div>
+  <p class="lede">Every probe passed. Every test passed. And the world model was not a
+  world model.</p>
+
+  <p>A world model has to answer "what if I press <i>this</i>?" So we asked the simplest
+  possible version of that question: hold RIGHT for eight moves, then hold LEFT for eight
+  moves from the same starting point, and see how differently the model imagines them.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 230" role="img" aria-label="Measuring how much the predicted future differs between holding right and holding left">
+      <rect x="14" y="70" width="104" height="54" rx="5" fill="#fff" stroke="#dcdcd2"/>
+      <rect x="24" y="108" width="84" height="7" fill="#e6e6dc"/><rect x="46" y="88" width="14" height="14" rx="3" fill="#2a78d6"/>
+      <text x="66" y="140" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#6f6f64">identical start</text>
+      <path d="M124,86 Q160,50 196,50" stroke="#1e7a46" stroke-width="1.8" fill="none" marker-end="url(#ar)"/>
+      <path d="M124,108 Q160,150 196,150" stroke="#c0392b" stroke-width="1.8" fill="none" marker-end="url(#ar)"/>
+      <text x="150" y="44" font-family="Helvetica" font-size="9.5" font-weight="650" fill="#1e7a46">8&times; RIGHT</text>
+      <text x="150" y="172" font-family="Helvetica" font-size="9.5" font-weight="650" fill="#c0392b">8&times; LEFT</text>
+      <rect x="202" y="30" width="120" height="40" rx="5" fill="#eef5fd" stroke="#1e7a46"/>
+      <text x="262" y="55" text-anchor="middle" font-family="Helvetica" font-size="10" fill="#1e7a46">imagined future A</text>
+      <rect x="202" y="130" width="120" height="40" rx="5" fill="#fdf2e9" stroke="#c0392b"/>
+      <text x="262" y="155" text-anchor="middle" font-family="Helvetica" font-size="10" fill="#c0392b">imagined future B</text>
+      <line x1="262" y1="74" x2="262" y2="126" stroke="#4a3aa7" stroke-width="2" stroke-dasharray="4 3"/>
+      <text x="272" y="104" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#4a3aa7">how far apart?</text>
+      <text x="400" y="52" font-family="Helvetica" font-size="10.5" fill="#44443c">Expected, if it understands buttons:</text>
+      <text x="400" y="70" font-family="Helvetica" font-size="13" font-weight="650" fill="#1e7a46">very far apart</text>
+      <text x="400" y="104" font-family="Helvetica" font-size="10.5" fill="#44443c">Measured, on our best model:</text>
+      <text x="400" y="124" font-family="Helvetica" font-size="17" font-weight="650" fill="#c0392b">4% apart</text>
+      <text x="400" y="146" font-family="Helvetica" font-size="10" fill="#6f6f64">&mdash; compared against how far two</text>
+      <text x="400" y="160" font-family="Helvetica" font-size="10" fill="#6f6f64">&nbsp;&nbsp; ordinary real frames drift apart</text>
+      <text x="400" y="188" font-family="Helvetica" font-size="10.5" fill="#44443c">And decoded into pixels of position:</text>
+      <text x="400" y="208" font-family="Helvetica" font-size="15" font-weight="650" fill="#c0392b">&minus;3.2 px &mdash; the wrong way</text>
+    </svg>
+    <figcaption><b>Figure 10.</b> The test nobody had run. Holding RIGHT for eight moves
+    produced an imagined future 4% different from holding LEFT &mdash; and when decoded
+    into a position, RIGHT came out slightly <i>behind</i> LEFT.</figcaption>
+  </figure>
+
+  <h3>Why every existing test missed it</h3>
+  <p>There were already three tests guarding this, and all three passed:</p>
+  <ol>
+    <li>AdaLN-Zero really is switched off at the start &mdash; <span class="win">passes</span></li>
+    <li>The predictor <i>can</i> respond when you change the button code &mdash; <span class="win">passes</span></li>
+    <li>The button pathway starts receiving learning signal at step 1 &mdash; <span class="win">passes</span></li>
+  </ol>
+  <p>All three ask whether the machinery is <b>capable</b> of using buttons. None asks
+  whether the finished model <b>does</b>. That gap is the entire finding, and it is an
+  easy gap to leave in any system of this kind.</p>
+
+  <div class="box warnb">
+    <h4>What "ignoring the buttons" actually looks like</h4>
+    <p style="margin:0">The model predicts the future from <b>momentum</b>. Given three
+    frames it can see the character is moving right at a certain speed, and simply
+    continues that. For short horizons this is accurate enough to score well &mdash; which
+    is precisely why the prediction loss never complained. It is a very good video
+    predictor and a very poor world model.</p>
+  </div>
+
+  <h3>The fix we tried, and why it failed instructively</h3>
+  <p>We added <b>inverse dynamics</b>: a small extra network that must guess <i>which
+  buttons were pressed</i> by looking at two consecutive summaries. The logic is that if
+  the buttons must be recoverable, the summaries have to encode them.</p>
+
+  <p>It worked perfectly by its own measure &mdash; the button-guessing error fell from
+  0.695 to <b>0.0023</b>, essentially perfect. And the model got <i>worse</i> at control:
+  its decoded position gap went from &minus;3.2 px to <b>&minus;67.4 px</b>.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 165" role="img" aria-label="Diagram contrasting tagging the action with simulating the action">
+      <rect x="14" y="30" width="310" height="112" rx="6" fill="#fdf2e9" stroke="#eb6834"/>
+      <text x="169" y="52" text-anchor="middle" font-family="Helvetica" font-size="11.5" font-weight="650" fill="#a86a00">WHAT WE ASKED FOR: a tag</text>
+      <rect x="44" y="66" width="110" height="44" rx="4" fill="#fff" stroke="#dcdcd2"/>
+      <text x="99" y="84" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#44443c">imagined future</text>
+      <text x="99" y="99" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#44443c">(basically unchanged)</text>
+      <rect x="168" y="72" width="60" height="32" rx="4" fill="#eb6834"/>
+      <text x="198" y="92" text-anchor="middle" font-family="Helvetica" font-size="9.5" font-weight="650" fill="#fff">"RIGHT"</text>
+      <text x="250" y="86" font-family="Helvetica" font-size="9.5" fill="#a86a00">sticker</text>
+      <text x="250" y="99" font-family="Helvetica" font-size="9.5" fill="#a86a00">attached</text>
+      <text x="169" y="130" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#6f6f64">button perfectly recoverable &#10003; &mdash; nothing else changed</text>
+
+      <rect x="358" y="30" width="328" height="112" rx="6" fill="#eef5fd" stroke="#2a78d6"/>
+      <text x="522" y="52" text-anchor="middle" font-family="Helvetica" font-size="11.5" font-weight="650" fill="#2a78d6">WHAT WE MEANT: a simulation</text>
+      <rect x="382" y="66" width="130" height="44" rx="4" fill="#fff" stroke="#dcdcd2"/>
+      <rect x="392" y="98" width="110" height="6" fill="#e6e6dc"/><rect x="400" y="84" width="12" height="12" rx="3" fill="#2a78d6"/>
+      <text x="447" y="128" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">pressed LEFT</text>
+      <rect x="536" y="66" width="130" height="44" rx="4" fill="#fff" stroke="#dcdcd2"/>
+      <rect x="546" y="98" width="110" height="6" fill="#e6e6dc"/><rect x="634" y="84" width="12" height="12" rx="3" fill="#2a78d6"/>
+      <text x="601" y="128" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">pressed RIGHT</text>
+      <text x="522" y="158" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#2a78d6">the character is in a genuinely different place</text>
+    </svg>
+    <figcaption><b>Figure 11.</b> The lesson. "Make the action recoverable" and "make the
+    action have an effect" are different objectives, and optimising the first can actively
+    damage the second. A sticker satisfies the first perfectly.</figcaption>
+  </figure>
+</section>
+<section class="part" id="planner">
+  <div class="kicker">Section 14</div>
+  <h2>Playing the game</h2>
+  <div class="rule"></div>
+  <p class="lede">With a world model you can plan: imagine many button sequences, keep the
+  best, act. Here is how well that works when your action signal is 6 pixels wide.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 215" role="img" aria-label="The CEM planning loop">
+      <circle cx="100" cy="66" r="30" fill="#eef5fd" stroke="#2a78d6" stroke-width="1.5"/>
+      <text x="100" y="62" text-anchor="middle" font-family="Helvetica" font-size="10" font-weight="650" fill="#2a78d6">1. GUESS</text>
+      <text x="100" y="76" text-anchor="middle" font-family="Helvetica" font-size="8.5" fill="#44443c">256 plans</text>
+      <path d="M132,66 L198,66" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <circle cx="234" cy="66" r="30" fill="#f0eef8" stroke="#4a3aa7" stroke-width="1.5"/>
+      <text x="234" y="62" text-anchor="middle" font-family="Helvetica" font-size="10" font-weight="650" fill="#4a3aa7">2. IMAGINE</text>
+      <text x="234" y="76" text-anchor="middle" font-family="Helvetica" font-size="8.5" fill="#44443c">all 256</text>
+      <path d="M266,66 L332,66" stroke="#6f6f64" stroke-width="1.5" marker-end="url(#ar)"/>
+      <circle cx="368" cy="66" r="30" fill="#eef5fd" stroke="#2a78d6" stroke-width="1.5"/>
+      <text x="368" y="62" text-anchor="middle" font-family="Helvetica" font-size="10" font-weight="650" fill="#2a78d6">3. SCORE</text>
+      <text x="368" y="76" text-anchor="middle" font-family="Helvetica" font-size="8.5" fill="#44443c">keep top 32</text>
+      <path d="M368,98 L368,128 L100,128 L100,100" stroke="#6f6f64" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+      <text x="234" y="144" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#6f6f64">repeat 4&times;, guessing near the winners each time</text>
+      <path d="M400,66 L466,66" stroke="#1e7a46" stroke-width="1.8" marker-end="url(#ar)"/>
+      <circle cx="502" cy="66" r="30" fill="#e9f5ee" stroke="#1e7a46" stroke-width="1.5"/>
+      <text x="502" y="62" text-anchor="middle" font-family="Helvetica" font-size="10" font-weight="650" fill="#1e7a46">4. ACT</text>
+      <text x="502" y="76" text-anchor="middle" font-family="Helvetica" font-size="8.5" fill="#44443c">2 real moves</text>
+      <path d="M502,98 L502,170 L100,170 L100,170" stroke="#1e7a46" stroke-width="1.5" fill="none" stroke-dasharray="4 3"/>
+      <path d="M100,170 L100,102" stroke="#1e7a46" stroke-width="1.5" fill="none" marker-end="url(#ar)" stroke-dasharray="4 3"/>
+      <text x="300" y="186" text-anchor="middle" font-family="Helvetica" font-size="9.5" fill="#1e7a46">then look at the real screen again and re-plan from scratch</text>
+      <text x="548" y="50" font-family="Helvetica" font-size="9.5" fill="#6f6f64">Only steps 1&ndash;3</text>
+      <text x="548" y="63" font-family="Helvetica" font-size="9.5" fill="#6f6f64">happen in imagination.</text>
+      <text x="548" y="80" font-family="Helvetica" font-size="9.5" fill="#6f6f64">The emulator is the</text>
+      <text x="548" y="93" font-family="Helvetica" font-size="9.5" fill="#6f6f64">referee, never the</text>
+      <text x="548" y="106" font-family="Helvetica" font-size="9.5" fill="#6f6f64">search space.</text>
+    </svg>
+    <figcaption><b>Figure 12.</b> CEM (Cross-Entropy Method) planning. Evolution by
+    natural selection, run four times per decision, entirely inside the model's
+    imagination.</figcaption>
+  </figure>
+
+  <h3>The result that validates the whole project</h3>
+  <p>We measured each model's action gap <b>before</b> running any planner, then ran the
+  planner. The gap predicted the outcome, in order, every time.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 290" role="img" aria-label="Scatter plot showing the measured action gap predicts how far the planner got">
+      <text x="16" y="18" font-family="Helvetica" font-size="10.5" font-weight="650" fill="#44443c">How far the planner actually got on World 1-1 (pixels)</text>
+      <line x1="120" y1="34" x2="120" y2="212" stroke="#c8c8bc"/>
+      <line x1="120" y1="212" x2="660" y2="212" stroke="#c8c8bc"/>
+      <line x1="120" y1="40" x2="660" y2="40" stroke="#ecece4"/>
+      <line x1="120" y1="97" x2="660" y2="97" stroke="#ecece4"/>
+      <line x1="120" y1="155" x2="660" y2="155" stroke="#ecece4"/>
+      <text x="114" y="44" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">800</text>
+      <text x="114" y="101" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">600</text>
+      <text x="114" y="159" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">400</text>
+      <text x="114" y="216" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">200</text>
+      <line x1="575" y1="34" x2="575" y2="212" stroke="#c8c8bc" stroke-dasharray="3 3"/>
+      <text x="575" y="228" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">0</text>
+      <text x="137" y="228" text-anchor="middle" font-family="Helvetica" font-size="9" fill="#6f6f64">&minus;67</text>
+      <text x="390" y="248" text-anchor="middle" font-family="Helvetica" font-size="10" fill="#6f6f64">Action gap measured from the frozen model, before any planning (pixels) &rarr;</text>
+      <path d="M145,200 Q380,175 606,66" stroke="#9a9a8c" stroke-width="1.3" fill="none" stroke-dasharray="5 4"/>
+      <circle cx="137" cy="203" r="8" fill="#4a3aa7"/>
+      <text x="152" y="196" font-family="Helvetica" font-size="10" font-weight="650" fill="#4a3aa7">pure + EMA + inv dyn</text>
+      <text x="152" y="209" font-family="Helvetica" font-size="9" fill="#6f6f64">gap &minus;67.4 px &rarr; reached 233</text>
+      <circle cx="588" cy="145" r="8" fill="#eb6834"/>
+      <text x="573" y="133" text-anchor="end" font-family="Helvetica" font-size="10" font-weight="650" fill="#eb6834">aux</text>
+      <text x="573" y="146" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">gap +1.96 px &rarr; reached 435</text>
+      <circle cx="614" cy="62" r="8" fill="#2a78d6"/>
+      <text x="599" y="50" text-anchor="end" font-family="Helvetica" font-size="10" font-weight="650" fill="#2a78d6">pure + EMA</text>
+      <text x="599" y="63" text-anchor="end" font-family="Helvetica" font-size="9" fill="#6f6f64">gap +6.07 px &rarr; reached 722</text>
+      <text x="16" y="276" font-family="Helvetica" font-size="9" fill="#6f6f64">Three models, three gaps, three planner outcomes &mdash; in the same order. The gap was measured first, with no planner involved.</text>
+    </svg>
+    <figcaption><b>Figure 13.</b> The thesis, demonstrated. A measurement taken from the
+    frozen representation correctly ranked how well each model could control the game
+    before any control was attempted.</figcaption>
+  </figure>
+
+  <h3>How far did it get?</h3>
+  <p>The best run reached <b>722 of 3,161 pixels &mdash; 23% of the level</b>. That is a
+  planner that moves, not one that plays. Two things stop it, and both are measured
+  rather than guessed:</p>
+  <ul>
+    <li><b>The action signal is +6 pixels</b> when the true effect of holding right versus
+    left is roughly 200. The planner is steering on about 3% of the real signal.</li>
+    <li><b>The danger detector reads 0.000</b> on imagined futures, so the planner has
+    <i>no working hazard avoidance at all</i>. Given a longer time limit, two of three
+    runs found a way to die.</li>
+  </ul>
+
+  <p>We also tested whether the planner itself was at fault by trying six different
+  planner settings &mdash; shorter plans, penalties for changing direction, restored
+  danger ranking, and double the search budget. <b>None beat the original.</b> Doubling
+  the search made it <i>worse</i>, which is the classic signature of an optimiser finding
+  more of a model's mistakes rather than more of the task's solutions. The bottleneck is
+  the model, not the search.</p>
+
+  <div class="box warnb">
+    <h4>On the other levels</h4>
+    <p style="margin:0">We tested four levels the model had never seen. It failed on all
+    of them &mdash; typically dying within 45&ndash;140 moves. This is expected and is
+    reported as a negative result: every one of the 8,000 training episodes came from a
+    single level, and the probes that score the planner were fitted on that level too, so
+    two different things fail at once and the design cannot separate them.</p>
+  </div>
+</section>
+
+<section class="part" id="learned">
+  <div class="kicker">Section 15</div>
+  <h2>What we learned</h2>
+  <div class="rule"></div>
+
+  <h3>Claimable</h3>
+  <ol>
+    <li><b>A momentum teacher fixes self-supervised JEPA on this task.</b> Height score
+    &minus;0.461 &rarr; +0.590 from one change, with no labels of any kind. That is
+    3.1&times; the previous published result.</li>
+    <li><b>More training does not rescue the broken configuration.</b> Ten times the
+    training made it slightly worse, which settles the obvious objection.</li>
+    <li><b>A representation-level measurement predicted control ability in advance</b>,
+    correctly ordering three models before any planner ran.</li>
+    <li><b>Action-recoverability and action-effect are different objectives.</b>
+    Optimising the first to near-perfection made the second substantially worse.</li>
+  </ol>
+
+  <h3>Not claimable, and worth saying plainly</h3>
+  <ul>
+    <li>The 0.962 score came from a model that was <b>told</b> the height. It measures
+    optimisation working, not discovery.</li>
+    <li>On horizontal position the previous work still scores better (0.997 against our
+    0.830). We win decisively on height and lose on that.</li>
+    <li>23% of one level is not "playing the game", and nothing here transfers to other
+    levels.</li>
+    <li>Every number is from a single seed. Nothing here has error bars.</li>
+  </ul>
+
+  <h3>What we would do next</h3>
+  <p>Put the loss directly on the quantity that matters: train the model so that
+  imagining "hold right" genuinely ends further right than imagining "hold left". That is
+  exactly what the gate measures and exactly what the planner consumes &mdash; so for the
+  first time the training objective, the alarm and the task would all be optimising the
+  same thing. A sticker cannot satisfy it.</p>
+</section>
+
+<section class="part" id="numbers">
+  <div class="kicker">Section 16</div>
+  <h2>All the numbers</h2>
+  <div class="rule"></div>
+  <p class="sub">Every figure below is measured. Final gate: 60 held-out complete
+  playthroughs, 24,313 moments, identical split across all four runs.</p>
+
+  <h3>Final scores</h3>
+  <table>
+    <tr><th>Model</th><th class="num">height (y)</th><th class="num">position (x)</th>
+        <th class="num">camera</th><th class="num">danger AUC</th><th class="num">action gap</th></tr>
+    <tr><td><b style="color:#eb6834">aux</b> (hints given)</td><td class="num">0.9620</td><td class="num">0.8303</td>
+        <td class="num">0.8381</td><td class="num">0.9838</td><td class="num">+1.96 px</td></tr>
+    <tr><td><b style="color:#4a3aa7">pure + EMA + inv dyn</b></td><td class="num">0.6511</td><td class="num">0.7541</td>
+        <td class="num">0.7577</td><td class="num">0.8730</td><td class="num">&minus;67.36 px</td></tr>
+    <tr><td><b style="color:#2a78d6">pure + EMA</b></td><td class="num">0.5904</td><td class="num">0.6883</td>
+        <td class="num">0.6938</td><td class="num">0.8556</td><td class="num">+6.07 px</td></tr>
+    <tr><td><b style="color:#1baf7a">pure + stop-grad</b></td><td class="num">&minus;0.4613</td><td class="num">&minus;0.1309</td>
+        <td class="num">&minus;0.1274</td><td class="num">0.6523</td><td class="num">not measurable</td></tr>
+    <tr><td>LeMario (previous work)</td><td class="num">0.188</td><td class="num">0.997</td>
+        <td class="num">&mdash;</td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr>
+  </table>
+
+  <h3>Height score at every checkpoint (the data behind Figure 9)</h3>
+  <table>
+    <tr><th>Progress</th><th class="num">aux</th><th class="num">pure+EMA</th>
+        <th class="num">+inv dyn</th><th class="num">pure+stop-grad</th></tr>
+    <tr><td>10%</td><td class="num">0.492</td><td class="num">0.218</td><td class="num">&minus;0.007</td><td class="num">&minus;1.147</td></tr>
+    <tr><td>20%</td><td class="num">0.499</td><td class="num">0.449</td><td class="num">&minus;0.022</td><td class="num">&minus;0.948</td></tr>
+    <tr><td>30%</td><td class="num">0.738</td><td class="num">0.460</td><td class="num">0.486</td><td class="num">&minus;0.403</td></tr>
+    <tr><td>40%</td><td class="num">0.849</td><td class="num">0.497</td><td class="num">0.589</td><td class="num">&minus;1.597</td></tr>
+    <tr><td>50%</td><td class="num">0.885</td><td class="num">0.471</td><td class="num">0.556</td><td class="num">&minus;5.984</td></tr>
+    <tr><td>60%</td><td class="num">0.924</td><td class="num">0.550</td><td class="num">0.638</td><td class="num">&minus;6.877</td></tr>
+    <tr><td>70%</td><td class="num">0.939</td><td class="num">0.535</td><td class="num">0.734</td><td class="num">&minus;3.571</td></tr>
+    <tr><td>80%</td><td class="num">0.947</td><td class="num">0.491</td><td class="num">0.748</td><td class="num">&minus;1.945</td></tr>
+    <tr><td>90%</td><td class="num">0.948</td><td class="num">0.516</td><td class="num">0.747</td><td class="num">&minus;3.042</td></tr>
+    <tr><td>100%</td><td class="num">0.949</td><td class="num">0.493</td><td class="num">0.746</td><td class="num">&minus;2.623</td></tr>
+  </table>
+  <p class="sub">These are the cheap in-training probe (24 playthroughs). The final
+  full-protocol scores in the table above (180 playthroughs) are the ones to quote.</p>
+
+  <h3>Planner results, World 1-1</h3>
+  <table>
+    <tr><th>Model</th><th class="num">best reached</th><th class="num">% of level</th><th>note</th></tr>
+    <tr><td>pure + EMA, longer limit</td><td class="num">722</td><td class="num">23%</td><td>best overall</td></tr>
+    <tr><td>pure + EMA</td><td class="num">560</td><td class="num">18%</td><td>400-move limit</td></tr>
+    <tr><td>aux</td><td class="num">435</td><td class="num">14%</td><td>&mdash;</td></tr>
+    <tr><td>pure + EMA + inv dyn</td><td class="num">233</td><td class="num">7%</td><td>inverted action signal</td></tr>
+  </table>
+
+  <h3>Training configuration</h3>
+  <table>
+    <tr><th>Setting</th><th>Value</th><th>Why</th></tr>
+    <tr><td>Steps / epochs</td><td>41,160 / 3</td><td>10.3&times; the previous checkpoint</td></tr>
+    <tr><td>Batch size</td><td>96</td><td>256 exhausts a 24 GB card at this window length</td></tr>
+    <tr><td>Learning rate</td><td>3&times;10&#8315;&#8308;, cosine</td><td>standard</td></tr>
+    <tr><td>Precision</td><td>bf16</td><td>fp16 destroys the SIGReg subtraction</td></tr>
+    <tr><td>SIGReg &lambda;</td><td>10.0</td><td>0.1 and 1.0 both collapse (measured)</td></tr>
+    <tr><td>Latent size</td><td>192</td><td>the summary length</td></tr>
+    <tr><td>History / horizon</td><td>3 / 5</td><td>moments seen / moments predicted</td></tr>
+    <tr><td>Trainable parameters</td><td>9.8M</td><td>plus 0.1M for the inverse-dynamics head</td></tr>
+    <tr><td>Hardware</td><td>1&times; H100 per run</td><td>~2.5 h each</td></tr>
+  </table>
+</section>
+<section class="part" id="links">
+  <div class="kicker">Section 17</div>
+  <h2>Links &amp; further reading</h2>
+  <div class="rule"></div>
+  <p class="lede">Where each idea in this document comes from, roughly easiest first.</p>
+
+  <h3>Start here if you want the intuition</h3>
+  <table>
+    <tr><th>What</th><th>Where</th></tr>
+    <tr><td><b>World Models</b> &mdash; Ha &amp; Schmidhuber. The paper that made
+      "let the agent dream" a mainstream idea. Very readable.</td>
+      <td><a href="https://arxiv.org/abs/1803.10122">arxiv.org/abs/1803.10122</a></td></tr>
+    <tr><td><b>I-JEPA</b> &mdash; the image version of the architecture used here, and the
+      clearest explanation of why predicting summaries beats predicting pixels.</td>
+      <td><a href="https://arxiv.org/abs/2301.08243">arxiv.org/abs/2301.08243</a></td></tr>
+    <tr><td><b>V-JEPA</b> &mdash; the video version, closest in spirit to what we built.</td>
+      <td><a href="https://arxiv.org/abs/2404.08471">arxiv.org/abs/2404.08471</a></td></tr>
+  </table>
+
+  <h3>The specific methods we used</h3>
+  <table>
+    <tr><th>What</th><th>Where</th></tr>
+    <tr><td><b>LeJEPA</b> &mdash; the source of SIGReg, the anti-collapse penalty. A copy
+      sits in the repository at <span class="mono">paper/LeJEPA-2511.08544.pdf</span>.</td>
+      <td><a href="https://arxiv.org/abs/2511.08544">arxiv.org/abs/2511.08544</a></td></tr>
+    <tr><td><b>BYOL</b> &mdash; where the momentum (EMA) teacher comes from. This is the
+      idea that produced our biggest single improvement.</td>
+      <td><a href="https://arxiv.org/abs/2006.07733">arxiv.org/abs/2006.07733</a></td></tr>
+    <tr><td><b>Vision Transformer (ViT)</b> &mdash; the "eye".</td>
+      <td><a href="https://arxiv.org/abs/2010.11929">arxiv.org/abs/2010.11929</a></td></tr>
+    <tr><td><b>DiT</b> &mdash; introduced adaLN-Zero, the mechanism by which button
+      presses modulate the prediction.</td>
+      <td><a href="https://arxiv.org/abs/2212.09748">arxiv.org/abs/2212.09748</a></td></tr>
+    <tr><td><b>PETS</b> &mdash; planning with a learned model using the Cross-Entropy
+      Method, which is what Section 14 does.</td>
+      <td><a href="https://arxiv.org/abs/1805.12114">arxiv.org/abs/1805.12114</a></td></tr>
+    <tr><td><b>PPO</b> &mdash; the algorithm behind the bot that recorded half our data.</td>
+      <td><a href="https://arxiv.org/abs/1707.06347">arxiv.org/abs/1707.06347</a></td></tr>
+    <tr><td><b>AdamW</b> &mdash; the optimiser.</td>
+      <td><a href="https://arxiv.org/abs/1711.05101">arxiv.org/abs/1711.05101</a></td></tr>
+  </table>
+
+  <h3>Software</h3>
+  <table>
+    <tr><th>What</th><th>Where</th></tr>
+    <tr><td><b>gym-super-mario-bros</b> &mdash; the environment wrapper.</td>
+      <td><a href="https://github.com/Kautenja/gym-super-mario-bros">github.com/Kautenja/gym-super-mario-bros</a></td></tr>
+    <tr><td><b>nes-py</b> &mdash; the emulator underneath it.</td>
+      <td><a href="https://github.com/Kautenja/nes-py">github.com/Kautenja/nes-py</a></td></tr>
+    <tr><td><b>timm</b> &mdash; supplies the Vision Transformer.</td>
+      <td><a href="https://github.com/huggingface/pytorch-image-models">github.com/huggingface/pytorch-image-models</a></td></tr>
+    <tr><td><b>PyTorch</b> &mdash; the framework everything is written in.</td>
+      <td><a href="https://pytorch.org/docs/stable/index.html">pytorch.org/docs</a></td></tr>
+    <tr><td><b>Stable-Baselines3</b> &mdash; the PPO implementation.</td>
+      <td><a href="https://stable-baselines3.readthedocs.io/">stable-baselines3.readthedocs.io</a></td></tr>
+    <tr><td><b>Modal</b> &mdash; rented the GPUs.</td>
+      <td><a href="https://modal.com/docs">modal.com/docs</a></td></tr>
+  </table>
+
+  <h3>Concepts worth looking up</h3>
+  <table>
+    <tr><th>Term</th><th>Where</th></tr>
+    <tr><td>Coefficient of determination (R&sup2;)</td>
+      <td><a href="https://en.wikipedia.org/wiki/Coefficient_of_determination">en.wikipedia.org/wiki/Coefficient_of_determination</a></td></tr>
+    <tr><td>Marchenko&ndash;Pastur distribution &mdash; tells us what effective dimension
+      a <i>random</i> model would show, so we know what number to beat</td>
+      <td><a href="https://en.wikipedia.org/wiki/Marchenko%E2%80%93Pastur_distribution">en.wikipedia.org/wiki/Marchenko–Pastur_distribution</a></td></tr>
+    <tr><td>Cross-entropy method</td>
+      <td><a href="https://en.wikipedia.org/wiki/Cross-entropy_method">en.wikipedia.org/wiki/Cross-entropy_method</a></td></tr>
+    <tr><td>bfloat16 number format</td>
+      <td><a href="https://en.wikipedia.org/wiki/Bfloat16_floating-point_format">en.wikipedia.org/wiki/Bfloat16_floating-point_format</a></td></tr>
+    <tr><td>Batch normalisation</td>
+      <td><a href="https://arxiv.org/abs/1502.03167">arxiv.org/abs/1502.03167</a></td></tr>
+  </table>
+
+  <h3>The code in this project</h3>
+  <table>
+    <tr><th>File</th><th>What lives there</th></tr>
+    <tr><td class="mono">aqmario/model.py</td><td>the eye, the ear, the imagination, and the momentum teacher</td></tr>
+    <tr><td class="mono">aqmario/losses.py</td><td>SIGReg, the hint heads, inverse dynamics</td></tr>
+    <tr><td class="mono">aqmario/train.py</td><td>the training loop, checkpoints, the in-training alarm</td></tr>
+    <tr><td class="mono">aqmario/gates.py</td><td>all the measurements, including the action-conditioning gate</td></tr>
+    <tr><td class="mono">aqmario/plan.py</td><td>the CEM planner</td></tr>
+    <tr><td class="mono">aqmario/data.py</td><td>the recording format and the trajectory split</td></tr>
+    <tr><td class="mono">modal_app.py</td><td>everything that runs on rented GPUs</td></tr>
+    <tr><td class="mono">tests/</td><td>168 automated tests, including the ones that would have caught this</td></tr>
+    <tr><td class="mono">media/</td><td>the planner videos</td></tr>
+  </table>
+
+  <div class="box tip" style="margin-top:18pt">
+    <h4>One honest closing note</h4>
+    <p style="margin:0">The most useful result in this document is a <b>negative</b> one:
+    a fix that worked perfectly by its own measure (0.695 &rarr; 0.0023) made the thing we
+    actually cared about substantially worse. That only became visible because we had
+    built a measurement of the thing we actually cared about. If there is one transferable
+    lesson here, it is that the metric you optimise and the metric you need are rarely the
+    same thing, and the gap between them is invisible until you measure it directly.</p>
+  </div>
+</section>
+
+</div></body></html>

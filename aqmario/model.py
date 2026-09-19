@@ -180,15 +180,48 @@ class Predictor(nn.Module):
 
 # ---- Full model -------------------------------------------------------------
 class JEPA(nn.Module):
-    def __init__(self, cfg=CFG, stop_grad_target: bool = False):
+    """
+    `ema_target` > 0 swaps the target branch for a momentum (EMA) teacher, the
+    I-JEPA / BYOL construction, and it is a DIFFERENT experiment from
+    `stop_grad_target` rather than a tidier spelling of it.
+
+    Both stop collapse by removing the optimiser's incentive to make z_target
+    constant, but they pay differently. stop_grad detaches the target, so the
+    future frames contribute NO gradient to the encoder at all -- the
+    representation of the thing being predicted is shaped only by whatever the
+    context path and SIGReg ask for. An EMA teacher keeps a target that is a slow
+    average of the student, so the target representation keeps developing while
+    still being unchaseable on any single step.
+
+    That difference is the reason to try it here. This project's measured result
+    is that a pure JEPA on this recipe does not encode Mario's height (y-probe
+    -0.383, worse than the 0.188 it set out to beat). If the reason is that
+    stop_grad leaves the future-frame representation underdetermined, an EMA
+    teacher should recover some of it WITHOUT adding a single supervised term --
+    which is the only kind of fix that keeps the "fully self-supervised" claim.
+    If it does not, that is a stronger negative result than the one we have.
+
+    The gates continue to measure the STUDENT encoder, exactly as the other two
+    arms do, so the three numbers stay directly comparable.
+    """
+
+    def __init__(self, cfg=CFG, stop_grad_target: bool = False,
+                 ema_target: float = 0.0):
         super().__init__()
         self.cfg = cfg
         self.encoder = Encoder(cfg)
         self.action_encoder = ActionEncoder(cfg)
         self.predictor = Predictor(cfg)
         self.stop_grad_target = stop_grad_target
+        self.ema_target = float(ema_target)
         self.H, self.P = cfg.model.history_len, cfg.model.pred_horizon
         self.W = self.H + self.P
+        self.target_encoder = None
+        if self.ema_target > 0:
+            import copy
+            self.target_encoder = copy.deepcopy(self.encoder)
+            for p in self.target_encoder.parameters():
+                p.requires_grad_(False)
 
     def action_codes(self, actions: torch.Tensor) -> torch.Tensor:
         """(B,W-1,skip,6) -> (B,W,D), prepending the learned null action."""
@@ -204,9 +237,34 @@ class JEPA(nn.Module):
         z = self.encoder(frames)                       # (B,W,D)
         a = self.action_codes(actions)                 # (B,W,D)
         zhat = self.predictor(z[:, :self.H], a)        # (B,P,D)
+        if self.target_encoder is not None:
+            # Teacher sees ONLY the future frames. The student still encodes the
+            # whole window, so SIGReg and the aux heads see exactly the same
+            # tensor they see in the other arms -- the teacher changes what is
+            # being predicted, not what is being regularised.
+            with torch.no_grad():
+                tgt = self.target_encoder(frames[:, self.H:])
+            return {"z": z, "zhat": zhat, "z_target": tgt}
         tgt = z[:, self.H:]
         return {"z": z, "zhat": zhat,
                 "z_target": tgt.detach() if self.stop_grad_target else tgt}
+
+    @torch.no_grad()
+    def ema_update(self):
+        """
+        One momentum step, called AFTER opt.step(). Buffers are copied, not
+        lerped: BN running statistics are already an exponential average of the
+        student's activations, and averaging an average again lags the teacher's
+        normalisation behind its own weights, which shows up as a slow drift
+        between train and eval statistics.
+        """
+        if self.target_encoder is None:
+            return
+        m = self.ema_target
+        for pt, ps in zip(self.target_encoder.parameters(), self.encoder.parameters()):
+            pt.lerp_(ps.detach(), 1 - m)
+        for bt, bs in zip(self.target_encoder.buffers(), self.encoder.buffers()):
+            bt.copy_(bs)
 
     @torch.no_grad()
     def rollout(self, frames: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
@@ -217,12 +275,18 @@ class JEPA(nn.Module):
     def param_report(self) -> dict:
         def n(m):
             return sum(p.numel() for p in m.parameters())
-        return {
+        rep = {
             "encoder": n(self.encoder),
             "action_encoder": n(self.action_encoder),
             "predictor": n(self.predictor),
-            "total": n(self),
+            # n(self) would fold in the frozen EMA teacher and report a model
+            # ~5.6M params larger than the one being trained, breaking the
+            # "~15M band" check and every params-vs-LeMario comparison.
+            "total": n(self) - (n(self.target_encoder) if self.target_encoder is not None else 0),
         }
+        if self.target_encoder is not None:
+            rep["ema_teacher_frozen"] = n(self.target_encoder)
+        return rep
 
 
 @torch.no_grad()
@@ -306,7 +370,10 @@ def load_jepa(weights: str | Path, cfg=CFG, map_location="cpu", strict: bool = T
             f"'jepa' key; got {type(blob).__name__} "
             f"{sorted(blob)[:6] if isinstance(blob, dict) else ''})")
 
-    m = JEPA(cfg)
+    # An EMA run's state_dict carries target_encoder.* keys; rebuilding without
+    # the teacher makes a strict load fail, and strict=False here is the trap
+    # documented above. Read the setting off the checkpoint instead.
+    m = JEPA(cfg, ema_target=float(blob.get("ema_target", 0.0) or 0.0))
     m.load_state_dict(blob["jepa"], strict=strict)
     if "aux" in blob:
         heads = AuxHeads(cfg)
